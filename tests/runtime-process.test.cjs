@@ -42,6 +42,45 @@ async function eventually(read,predicate,timeout=15000) {
   while(Date.now()<deadline) { const value=await read();if(predicate(value))return value;await delay(100); }
   throw new Error('Expected durable state was not reached');
 }
+const retryCapStatus=new Set(['pending','sending','sent','failed']);
+const retryCapDiagnostic=new Set(['http:400','http:401','http:403','http:404','http:408','http:429','http:500','http:502','http:503','http:504','ambiguous-send']);
+const retryCapBound=value=>Number.isFinite(value)?Math.min(180000,Math.max(0,Math.floor(value))):0;
+function retryCapSnapshot(rawJobs,rawRequestElapsedMs,rawElapsedMs) {
+  const jobs=Array.isArray(rawJobs)?rawJobs.slice(0,2):[];
+  const requests=Array.isArray(rawRequestElapsedMs)?rawRequestElapsedMs.slice(0,6):[];
+  return {
+    schemaVersion:1,
+    jobCount:jobs.length,
+    jobs:jobs.map(job=>({
+      status:retryCapStatus.has(job?.status)?job.status:'unknown',
+      attempts:Number.isFinite(job?.attempts)?Math.min(5,Math.max(0,Math.floor(job.attempts))):0,
+      diagnostic:retryCapDiagnostic.has(job?.diagnostic)?job.diagnostic:'other'
+    })),
+    requestCount:requests.length,
+    requestElapsedMs:requests.map(retryCapBound),
+    elapsedMs:retryCapBound(rawElapsedMs)
+  };
+}
+
+test('retry-cap diagnostic snapshot is fixed-schema, bounded, and redacted',()=> {
+  const snapshot=retryCapSnapshot([
+    {status:'PRIVATE-pending',attempts:-4,diagnostic:'https://private.example/secret',jobKey:'PRIVATE_JOB_KEY'},
+    {status:'failed',attempts:99,diagnostic:'http:503',rawResponse:'PRIVATE_BODY'},
+    {status:'sent',attempts:1,diagnostic:'ambiguous-send'}
+  ],[-5,1.9,999999,2,3,4,5],999999);
+  assert.deepEqual(snapshot,{
+    schemaVersion:1,
+    jobCount:2,
+    jobs:[
+      {status:'unknown',attempts:0,diagnostic:'other'},
+      {status:'failed',attempts:5,diagnostic:'http:503'}
+    ],
+    requestCount:6,
+    requestElapsedMs:[0,1,180000,2,3,4],
+    elapsedMs:180000
+  });
+  assert.doesNotMatch(JSON.stringify(snapshot),/PRIVATE|https|secret|jobKey|rawResponse/);
+});
 
 test('invalid input is neutral and Doctor exposes only bounded fixed input classes', async()=> {
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'atn-input-'));
@@ -116,8 +155,13 @@ test('real worker reaches five-attempt cap and permanent rejection never retries
   try {
     await script(`Import-Module ./src/Storage.psm1; Write-ATNJson ${quote(path.join(directory,'settings.json'))} @{minSeconds=1;longTaskSeconds=2;continuous=$false}; Set-ATNCredential ${quote(directory)} bark @{endpoint='http://127.0.0.1:${server.address().port}/synthetic-key'}`);
     const input={hook_event_name:'UserPromptSubmit',session_id:'synthetic-session',turn_id:'retry-cap'};
-    await hook(directory,input);await delay(1100);await hook(directory,{...input,hook_event_name:'Stop'});
-    const done=(await eventually(()=>jobs(directory),j=>j[0]?.status==='failed',130000))[0];
+    await hook(directory,input);await delay(1100);const retryCapStartedAt=Date.now();await hook(directory,{...input,hook_event_name:'Stop'});
+    let done;
+    try { done=(await eventually(()=>jobs(directory),j=>j[0]?.status==='failed',130000))[0]; }
+    catch {
+      const snapshot=retryCapSnapshot(await jobs(directory),requests.map(at=>at-retryCapStartedAt),Date.now()-retryCapStartedAt);
+      throw new Error(`Expected durable state was not reached; retry-cap-snapshot=${JSON.stringify(snapshot)}`);
+    }
     assert.equal(done.attempts,5);assert.equal(done.diagnostic,'http:503');assert.equal(requests.length,5);
     for(const [i,min] of [[1,4800],[2,14800],[3,29800],[4,59800]])assert.ok(requests[i]-requests[i-1]>=min);
     const again=await processRun(['-NoProfile','-File',entry,'-Mode','Worker','-DataDirectory',directory,'-JobKey',done.key]);assert.equal(again.code,1);assert.equal(requests.length,5);
