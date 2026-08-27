@@ -99,7 +99,7 @@ function Invoke-ATNWorker {
         [scriptblock]$Wait = { param($seconds) Start-Sleep -Seconds $seconds }
     )
     $path = Join-Path $DataDirectory "jobs/$JobKey.json"
-    $lock = Enter-ATNLock ($path + '.lock')
+    $lock = Enter-ATNLock ($path + '.lock') -WaitMilliseconds 2000
     if ($null -eq $lock) { return }
     try {
         $job = Read-ATNJson $path

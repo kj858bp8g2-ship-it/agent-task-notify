@@ -27,6 +27,36 @@ async function script(code) {
   const result=await processRun(['-NoProfile','-NonInteractive','-Command','-'],code+'\n');
   assert.equal(result.code,0,result.err);assert.equal(result.err,'');return result;
 }
+function signaledProcess(code,timeout=15000) {
+  const child=spawn('pwsh',['-NoProfile','-NonInteractive','-Command',code],{cwd:repo,windowsHide:true,stdio:['pipe','pipe','pipe']});
+  let out='',err='',closed=false,timedOut=false;
+  const listeners=new Set();
+  const changed=()=>{for(const listener of listeners)listener();};
+  const completion=new Promise(resolve=> {
+    const timer=setTimeout(()=>{timedOut=true;child.kill();},timeout);
+    child.stdout.on('data',chunk=>{out+=chunk.toString('utf8');changed();});
+    child.stderr.on('data',chunk=>err+=chunk.toString('utf8'));
+    child.on('error',()=>{err='Test subprocess could not start';});
+    child.on('close',code=>{closed=true;clearTimeout(timer);changed();resolve({code,stderrEmpty:err==='',timedOut});});
+  });
+  return {
+    completion,
+    waitFor(pattern) {
+      return new Promise((resolve,reject)=> {
+        const timer=setTimeout(()=>finish(new Error('Test subprocess signal timed out')),10000);
+        const finish=(error,match)=>{clearTimeout(timer);listeners.delete(check);error?reject(error):resolve(match);};
+        const check=()=> {
+          const match=out.split(/\r?\n/).map(line=>line.match(pattern)).find(Boolean);
+          if(match)finish(null,match);
+          else if(closed)finish(new Error('Test subprocess closed before its fixed signal'));
+        };
+        listeners.add(check);check();
+      });
+    },
+    release(){child.stdin.end('ATN_RELEASE\n');},
+    async stop(){if(!closed)child.kill();await completion;}
+  };
+}
 async function hook(directory,event) {
   // CP936 intentionally contradicts the UTF-8 bytes written to stdin.
   const command=`[Console]::InputEncoding=[Text.Encoding]::GetEncoding(936); & ${quote(entry)} -Mode Hook -Agent codex -DataDirectory ${quote(directory)}`;
@@ -45,7 +75,7 @@ async function eventually(read,predicate,timeout=15000) {
   throw Object.assign(new Error(durableStateTimeoutMessage),{code:durableStateTimeoutCode});
 }
 const retryCapStatus=new Set(['pending','sending','sent','failed']);
-const retryCapDiagnostic=new Set(['http:400','http:401','http:403','http:404','http:408','http:429','http:500','http:502','http:503','http:504','ambiguous-send']);
+const retryCapDiagnostic=new Set(['http:400','http:401','http:403','http:404','http:408','http:429','http:500','http:502','http:503','http:504','ambiguous-send','spawn-failed','credential','worker-error']);
 const retryCapBound=value=>Number.isFinite(value)?Math.min(180000,Math.max(0,Math.floor(value))):0;
 function retryCapSnapshot(rawJobs,rawRequestElapsedMs,rawElapsedMs) {
   const jobs=Array.isArray(rawJobs)?rawJobs.slice(0,2):[];
@@ -56,7 +86,7 @@ function retryCapSnapshot(rawJobs,rawRequestElapsedMs,rawElapsedMs) {
     jobs:jobs.map(job=>({
       status:retryCapStatus.has(job?.status)?job.status:'unknown',
       attempts:Number.isFinite(job?.attempts)?Math.min(5,Math.max(0,Math.floor(job.attempts))):0,
-      diagnostic:retryCapDiagnostic.has(job?.diagnostic)?job.diagnostic:'other'
+      diagnostic:job?.diagnostic==null||job.diagnostic===''?'none':retryCapDiagnostic.has(job?.diagnostic)?job.diagnostic:'other'
     })),
     requestCount:requests.length,
     requestElapsedMs:requests.map(retryCapBound),
@@ -98,6 +128,73 @@ test('retry-cap diagnostic decorates only the durable-state timeout',()=> {
   assert.equal(retryCapFailure(readFailure,[],[],0),readFailure);
   assert.equal(readFailure.message,'unexpected synthetic JSON');
 });
+
+test('retry-cap diagnostic distinguishes no diagnostic and fixed startup failures',()=> {
+  const diagnostics=[null,'','spawn-failed','credential','worker-error','ambiguous-send','PRIVATE_FAILURE'];
+  assert.deepEqual(diagnostics.map(diagnostic=>retryCapSnapshot([{status:'pending',attempts:0,diagnostic}],[],0).jobs[0].diagnostic),['none','none','spawn-failed','credential','worker-error','ambiguous-send','other']);
+});
+
+for(const releaseShortLock of [true,false]) {
+  test(releaseShortLock?'real worker waits through a short maintenance lock and sends once':'real worker bounds startup waiting while a long lock keeps the job pending',{timeout:30000},async t=> {
+    const temporaryParent=path.resolve(os.tmpdir());
+    const directory=await fs.mkdtemp(path.join(temporaryParent,'atn-lock-'));
+    const key='b'.repeat(64),children=[];
+    let requests=0;
+    const server=http.createServer(async(req,res)=>{for await(const chunk of req){}requests++;res.writeHead(200,{'Content-Type':'application/json'});res.end('{"code":200}');});
+    try {
+      await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+      await script(`$runtime=Import-Module ./src/Runtime.psm1 -PassThru; Import-Module ./src/Storage.psm1; Set-ATNCredential ${quote(directory)} bark @{endpoint='http://127.0.0.1:${server.address().port}/synthetic-key'}; & $runtime { param($directory,$key) $job=New-ATNJob codex (Get-ATNSettings $directory) 300 stopped ([DateTimeOffset]::UtcNow) -RingSeconds 30; Write-ATNJson (Join-Path $directory "jobs/$key.json") $job } ${quote(directory)} ${quote(key)}`);
+      const before=await jobs(directory);
+      const holder=signaledProcess(`$ErrorActionPreference='Stop'; Import-Module ./src/Storage.psm1; $held=Enter-ATNLock ${quote(path.join(directory,'jobs',key+'.json.lock'))}; if($null -eq $held){throw 'Synthetic lock unavailable'}; try { [Console]::WriteLine('ATN_LOCK_READY'); if([Console]::ReadLine() -cne 'ATN_RELEASE'){throw 'Synthetic release missing'} } finally { $held.Dispose() }; [Console]::WriteLine('ATN_LOCK_RELEASED')`);
+      children.push(holder);
+      await holder.waitFor(/^ATN_LOCK_READY$/);
+      const worker=signaledProcess(`$ErrorActionPreference='Stop'; $runtime=Import-Module ./src/Runtime.psm1 -PassThru; & $runtime {
+        param($directory,$key)
+        $originalLock=Get-Command Enter-ATNLock
+        try {
+          function Enter-ATNLock {
+            param([string]$Path,[int]$WaitMilliseconds=0)
+            [Console]::WriteLine('ATN_WORKER_LOCK:' + $WaitMilliseconds)
+            & $originalLock -Path $Path -WaitMilliseconds $WaitMilliseconds
+          }
+          $clock=[Diagnostics.Stopwatch]::StartNew()
+          Invoke-ATNWorker $key $directory
+          [Console]::WriteLine('ATN_WORKER_DONE:' + $clock.ElapsedMilliseconds)
+        } finally { Set-Item Function:Enter-ATNLock -Value $originalLock.ScriptBlock }
+      } ${quote(directory)} ${quote(key)}`);
+      children.push(worker);
+      const entered=await worker.waitFor(/^ATN_WORKER_LOCK:([0-9]+)$/);
+      assert.equal(Number(entered[1]),2000,'Worker must pass the bounded wait to the real job lock');
+      if(releaseShortLock) {
+        await delay(100);
+        assert.equal(requests,0,'No request may start while maintenance owns the lock');
+        holder.release();
+        await holder.waitFor(/^ATN_LOCK_RELEASED$/);
+        assert.deepEqual(await holder.completion,{code:0,stderrEmpty:true,timedOut:false});
+      }
+      const finished=await worker.waitFor(/^ATN_WORKER_DONE:([0-9]+)$/);
+      assert.deepEqual(await worker.completion,{code:0,stderrEmpty:true,timedOut:false});
+      const elapsed=Number(finished[1]);
+      const after=await jobs(directory);
+      if(releaseShortLock) {
+        assert.ok(elapsed>=100&&elapsed<5000,'Short lock must be acquired within the bounded process budget');
+        assert.equal(requests,1);assert.equal(after.length,1);
+        assert.equal(after[0].status,'sent');assert.equal(after[0].attempts,1);
+      } else {
+        assert.ok(elapsed>=1900&&elapsed<5000,'Long lock wait must take about two seconds, not return immediately or wait forever');
+        assert.equal(requests,0);assert.deepEqual(after,before,'Long lock must leave the pending job untouched');
+      }
+      t.diagnostic(`startup-lock waitMilliseconds=2000 elapsedMs=${elapsed} requestCount=${requests} status=${after[0].status} attempts=${after[0].attempts}`);
+    } finally {
+      await Promise.all(children.map(child=>child.stop()));
+      if(server.listening)await new Promise(resolve=>server.close(resolve));
+      const absolute=path.resolve(directory);
+      assert.equal(path.dirname(absolute),temporaryParent,'Cleanup is confined to this test temporary parent');
+      assert.ok(path.basename(absolute).startsWith('atn-lock-'),'Cleanup is confined to this generated directory');
+      await fs.rm(absolute,{recursive:true,force:true});
+    }
+  });
+}
 
 test('invalid input is neutral and Doctor exposes only bounded fixed input classes', async()=> {
   const directory=await fs.mkdtemp(path.join(os.tmpdir(),'atn-input-'));

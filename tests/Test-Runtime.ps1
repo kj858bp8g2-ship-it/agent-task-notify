@@ -61,6 +61,35 @@ try {
     # Catches replay of ambiguous sending, unbounded retries, and loss of frozen settings.
     Assert-True ($null -ne (Get-Command Invoke-ATNWorker -ErrorAction SilentlyContinue)) 'Worker must exist'
     Set-ATNCredential $root 'bark' @{endpoint='http://127.0.0.1/synthetic-key'}
+    # Missing bounded startup waiting can lose a worker during a cleanup lock.
+    $startupKey=Get-ATNKey @('synthetic-startup-lock')
+    $startupPath=Join-Path $root "jobs/$startupKey.json"
+    Write-ATNJson $startupPath (New-ATNPreview codex $root -RingSeconds 30)
+    try {
+        $observed=& (Get-Module Runtime) {
+            param($directory,$jobKey)
+            $originalLock=Get-Command Enter-ATNLock
+            $observation=@{waitMilliseconds=-1;sends=0;restored=$false}
+            try {
+                function Enter-ATNLock {
+                    param([string]$Path,[int]$WaitMilliseconds=0)
+                    $observation.waitMilliseconds=$WaitMilliseconds
+                    & $originalLock -Path $Path -WaitMilliseconds $WaitMilliseconds
+                }
+                Invoke-ATNWorker $jobKey $directory -Send {param($s,$c,$p) $observation.sends++;@{accepted=$true}}
+            } finally {
+                Set-Item Function:Enter-ATNLock -Value $originalLock.ScriptBlock
+                $observation.restored=[object]::ReferenceEquals((Get-Command Enter-ATNLock).ScriptBlock,$originalLock.ScriptBlock)
+            }
+            return $observation
+        } $root $startupKey
+        Assert-True $observed.restored 'Startup lock observer restores the original function'
+        Assert-Equal $observed.waitMilliseconds 2000 'Worker waits briefly for a startup maintenance lock'
+        Assert-Equal $observed.sends 1 'Observed worker still invokes the real lock and sends once'
+        Assert-Equal (Read-TestJob $startupKey).status 'sent' 'Observed worker persists accepted state'
+        Assert-Equal (Read-TestJob $startupKey).attempts 1 'Observed worker persists one attempt'
+        'PASS Runtime startup lock wait'
+    } finally { [IO.File]::Delete($startupPath) }
     $script:sends=0; $script:waits=@()
     $sendFailure={ param($settings,$credential,$payload)
         $script:sends++
