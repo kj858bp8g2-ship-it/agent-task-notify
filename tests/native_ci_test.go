@@ -2,8 +2,6 @@ package tests
 
 import (
 	"context"
-	"crypto/sha256"
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -75,10 +73,41 @@ func TestNativeWorkflowArtifactNameIncludesMatrixLabelAndRunnerIdentity(t *testi
 	}
 }
 
+func TestNativeCIScriptRejectsWrongGoSelection(t *testing.T) {
+	runnerTemp := t.TempDir()
+	log := filepath.Join(t.TempDir(), "security.log")
+	fakeSecurity := writeFakeSecurity(t)
+	expectedGoDir := writeFakeGo(t)
+	wrongGoDir := t.TempDir()
+	wrongGoLog := filepath.Join(wrongGoDir, "invoked")
+	if err := os.WriteFile(filepath.Join(wrongGoDir, "go"), []byte("#!/bin/sh\nprintf invoked > \"${ATN_WRONG_GO_LOG:?}\"\nexit 79\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	code, output := runNativeCIScript(t, productionNativeCIScript(t), map[string]string{
+		"CI":                     "true",
+		"RUNNER_TEMP":            runnerTemp,
+		"ATN_TEST_FAKE_SECURITY": "1",
+		"ATN_TEST_SECURITY_BIN":  filepath.ToSlash(fakeSecurity),
+		"ATN_FAKE_SECURITY_LOG":  filepath.ToSlash(log),
+		"ATN_TEST_FAKE_GO_DIR":   filepath.ToSlash(expectedGoDir),
+		"ATN_WRONG_GO_LOG":       filepath.ToSlash(wrongGoLog),
+		"PATH":                   filepath.ToSlash(wrongGoDir),
+	})
+	if code != 98 || !strings.Contains(output, "native CI test requires fake go") {
+		t.Fatalf("expected refusal before wrong go selection: code=%d output=%q", code, output)
+	}
+	for _, path := range []string{log, wrongGoLog} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("command ran before fake go selection was verified: path=%s err=%v", path, err)
+		}
+	}
+}
+
 func TestNativeCIScriptFilesecCounterfactualEvidence(t *testing.T) {
 	for _, scenario := range []struct {
 		name       string
 		mode       string
+		alterFile  string
 		wantCode   int
 		wantMarker string
 	}{
@@ -86,30 +115,58 @@ func TestNativeCIScriptFilesecCounterfactualEvidence(t *testing.T) {
 		{name: "partial rejection text", mode: "partial", wantCode: 1, wantMarker: "filesec-counterfactual: unexpected failure evidence"},
 		{name: "unexpected pass", mode: "pass", wantCode: 1, wantMarker: "filesec-counterfactual: unexpected pass"},
 		{name: "unrelated failure", mode: "unrelated", wantCode: 1, wantMarker: "filesec-counterfactual: unexpected failure evidence"},
+		{name: "changed historical bytes", mode: "expected", alterFile: "acl_darwin.go", wantCode: 1, wantMarker: "filesec-counterfactual: unexpected failure evidence"},
+		{name: "changed current test bytes", mode: "expected", alterFile: "files_darwin_test.go", wantCode: 1, wantMarker: "filesec-counterfactual: unexpected failure evidence"},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
 			runnerTemp := t.TempDir()
 			log := filepath.Join(t.TempDir(), "security.log")
 			fakeSecurity := writeFakeSecurity(t)
 			fakeGoDir := writeFakeGo(t)
-			oldACLHash := historicalFileSHA256(t, "0062d3b1ccc08c2b81112d8c843b8800f3af4df2:internal/store/acl_darwin.go")
-			currentTestHash := localFileSHA256(t, filepath.Join("..", "internal", "store", "files_darwin_test.go"))
-			code, output := runNativeCIScript(t, productionNativeCIScript(t), map[string]string{
-				"CI":                           "true",
-				"RUNNER_TEMP":                  runnerTemp,
-				"ATN_TEST_FAKE_SECURITY":       "1",
-				"ATN_TEST_SECURITY_BIN":        filepath.ToSlash(fakeSecurity),
-				"ATN_FAKE_SECURITY_LOG":        filepath.ToSlash(log),
-				"ATN_FAKE_FILESEC_MODE":        scenario.mode,
-				"ATN_FAKE_OLD_ACL_SHA256":      oldACLHash,
-				"ATN_FAKE_CURRENT_TEST_SHA256": currentTestHash,
-				"PATH":                         filepath.ToSlash(fakeGoDir) + ";" + os.Getenv("PATH"),
+			goLog := filepath.Join(t.TempDir(), "go.log")
+			oldACL, currentTest := writeExpectedNativeCIInputs(t)
+			script := productionNativeCIScript(t)
+			if scenario.alterFile != "" {
+				contents, err := os.ReadFile(script)
+				if err != nil {
+					t.Fatal(err)
+				}
+				const invocation = `    (cd "$counter_root" && go test`
+				if strings.Count(string(contents), invocation) != 1 {
+					t.Fatal("cannot locate counterfactual invocation for byte-corruption check")
+				}
+				modified := strings.Replace(string(contents), invocation, "    printf '\\n' >> \"$counter_root/internal/store/"+scenario.alterFile+"\"\n"+invocation, 1)
+				script = filepath.Join(t.TempDir(), "native-ci-altered-copy.sh")
+				if err := os.WriteFile(script, []byte(modified), 0o700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			code, output := runNativeCIScript(t, script, map[string]string{
+				"CI":                         "true",
+				"RUNNER_TEMP":                runnerTemp,
+				"ATN_TEST_FAKE_SECURITY":     "1",
+				"ATN_TEST_SECURITY_BIN":      filepath.ToSlash(fakeSecurity),
+				"ATN_FAKE_SECURITY_LOG":      filepath.ToSlash(log),
+				"ATN_FAKE_FILESEC_MODE":      scenario.mode,
+				"ATN_FAKE_OLD_ACL_FILE":      filepath.ToSlash(oldACL),
+				"ATN_FAKE_CURRENT_TEST_FILE": filepath.ToSlash(currentTest),
+				"ATN_TEST_FAKE_GO_DIR":       filepath.ToSlash(fakeGoDir),
+				"ATN_FAKE_GO_LOG":            filepath.ToSlash(goLog),
+				"PATH":                       filepath.ToSlash(fakeGoDir) + string(os.PathListSeparator) + os.Getenv("PATH"),
 			})
 			if code != scenario.wantCode || !strings.Contains(output, scenario.wantMarker) {
 				t.Fatalf("unexpected filesec result: code=%d output=%q", code, output)
 			}
 			if _, err := os.Stat(log); err != nil {
 				t.Fatalf("fake fixture did not run: %v", err)
+			}
+			goCalls, err := os.ReadFile(goLog)
+			wantCalls := "test -count=1 -v -timeout=45s -run ^TestDarwinRejectsIncompleteFileSecurity$ ./internal/store\n"
+			if scenario.wantCode == 0 {
+				wantCalls += "test -count=1 -v ./...\n"
+			}
+			if err != nil || string(goCalls) != wantCalls {
+				t.Fatalf("unexpected fake go invocations: got=%q want=%q err=%v", goCalls, wantCalls, err)
 			}
 			remaining, err := os.ReadDir(runnerTemp)
 			if err != nil || len(remaining) != 0 {
@@ -176,6 +233,17 @@ func runNativeCIScript(t *testing.T, script string, extra map[string]string) (in
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bash, script)
+	if fakeGoDir := extra["ATN_TEST_FAKE_GO_DIR"]; fakeGoDir != "" {
+		// Resolve before sourcing in this same shell: a broken PATH must never
+		// reach the real Go toolchain (which could recursively run this suite).
+		const guarded = `if ! test "$(command -v go)" -ef "$1/go"; then
+  printf '%s\n' 'native CI test requires fake go' >&2
+  exit 98
+fi
+. "$2"
+`
+		cmd = exec.CommandContext(ctx, bash, "-c", guarded, "native-ci-test", filepath.ToSlash(fakeGoDir), script)
+	}
 	root, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -204,7 +272,7 @@ func withoutNativeCIEnvironment(env []string) []string {
 	for _, entry := range env {
 		key, _, _ := strings.Cut(entry, "=")
 		switch key {
-		case "CI", "RUNNER_TEMP", "ATN_TEST_FAKE_SECURITY", "ATN_TEST_SECURITY_BIN", "ATN_FAKE_SECURITY_LOG", "ATN_FAKE_SECURITY_FAIL_DEFAULT", "ATN_FAKE_FILESEC_MODE":
+		case "CI", "RUNNER_TEMP", "ATN_TEST_FAKE_SECURITY", "ATN_TEST_SECURITY_BIN", "ATN_FAKE_SECURITY_LOG", "ATN_FAKE_SECURITY_FAIL_DEFAULT", "ATN_FAKE_FILESEC_MODE", "ATN_TEST_FAKE_GO_DIR", "ATN_FAKE_GO_LOG", "ATN_FAKE_OLD_ACL_FILE", "ATN_FAKE_CURRENT_TEST_FILE", "ATN_WRONG_GO_LOG":
 			continue
 		}
 		filtered = append(filtered, entry)
@@ -248,13 +316,17 @@ func writeFakeGo(t *testing.T) string {
 	path := filepath.Join(dir, "go")
 	const fake = `#!/usr/bin/env bash
 set -eu
+# Exercise the script without undeclared hashing tools on every host.
+sha256sum() { return 97; }
+awk() { return 97; }
+printf '%s\n' "$*" >> "${ATN_FAKE_GO_LOG:?}"
 if [[ "$*" == *TestDarwinRejectsIncompleteFileSecurity* ]]; then
   if test "$*" != 'test -count=1 -v -timeout=45s -run ^TestDarwinRejectsIncompleteFileSecurity$ ./internal/store' ||
       [[ "$PWD" != */atn-go-tmp.*/filesec-counterfactual ]] ||
       ! test -f go.mod || ! test -f go.sum ||
       ! test -f internal/store/files_darwin_test.go ||
-      test "$(sha256sum internal/store/acl_darwin.go | awk '{print $1}')" != "${ATN_FAKE_OLD_ACL_SHA256:?}" ||
-      test "$(sha256sum internal/store/files_darwin_test.go | awk '{print $1}')" != "${ATN_FAKE_CURRENT_TEST_SHA256:?}"; then
+      ! cmp -s internal/store/acl_darwin.go "${ATN_FAKE_OLD_ACL_FILE:?}" ||
+      ! cmp -s internal/store/files_darwin_test.go "${ATN_FAKE_CURRENT_TEST_FILE:?}"; then
     printf '%s\n' 'filesec fake contract failure'
     exit 1
   fi
@@ -279,22 +351,25 @@ printf '%s\n' '--- PASS: TestDarwinLockedKeychainBackgroundDenial (0.00s)' '--- 
 	return dir
 }
 
-func historicalFileSHA256(t *testing.T, spec string) string {
+func writeExpectedNativeCIInputs(t *testing.T) (string, string) {
 	t.Helper()
-	output, err := exec.Command("git", "show", spec).Output()
+	oldACL, err := exec.Command("git", "show", "0062d3b1ccc08c2b81112d8c843b8800f3af4df2:internal/store/acl_darwin.go").Output()
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fmt.Sprintf("%x", sha256.Sum256(output))
-}
-
-func localFileSHA256(t *testing.T, name string) string {
-	t.Helper()
-	contents, err := os.ReadFile(name)
+	currentTest, err := os.ReadFile(filepath.Join("..", "internal", "store", "files_darwin_test.go"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return fmt.Sprintf("%x", sha256.Sum256(contents))
+	dir := t.TempDir()
+	oldACLPath := filepath.Join(dir, "expected-acl")
+	currentTestPath := filepath.Join(dir, "expected-test")
+	for path, contents := range map[string][]byte{oldACLPath: oldACL, currentTestPath: currentTest} {
+		if err := os.WriteFile(path, contents, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return oldACLPath, currentTestPath
 }
 
 func findLine(t *testing.T, lines []string, parts ...string) int {
