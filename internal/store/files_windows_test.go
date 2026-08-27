@@ -184,10 +184,61 @@ func assertPrivateACL(t *testing.T, path string) {
 	}
 }
 
+func TestWindowsTrustedAncestorOwnerRequiresExactSID(t *testing.T) {
+	installer, _, _, err := windows.LookupSID("", `NT SERVICE\TrustedInstaller`)
+	if err != nil || installer == nil || !installer.IsValid() {
+		t.Fatal("fixture service SID unavailable")
+	}
+	parse := func(value string) *windows.SID {
+		t.Helper()
+		sid, err := windows.StringToSid(value)
+		if err != nil {
+			t.Fatal("fixture SID unavailable")
+		}
+		return sid
+	}
+	current := parse("S-1-5-21-111-222-333-1001")
+	// Mutate only this copied SID's revision, never any filesystem owner.
+	invalid := parse("S-1-0-0")
+	*(*byte)(unsafe.Pointer(invalid)) = 0
+	if invalid.IsValid() {
+		t.Fatal("invalid SID fixture accepted by OS")
+	}
+	for _, tc := range []struct {
+		name                      string
+		owner, current, installer *windows.SID
+		want                      bool
+	}{
+		{"current", current, current, nil, true},
+		{"system", parse("S-1-5-18"), current, nil, true},
+		{"administrators", parse("S-1-5-32-544"), current, nil, true},
+		{"trusted-installer", parse(installer.String()), current, installer, true},
+		{"all-services", parse("S-1-5-80-0"), current, installer, false},
+		{"other-service", parse("S-1-5-80-111-222-333-444-555"), current, installer, false},
+		{"foreign-user", parse("S-1-5-21-111-222-333-1002"), current, installer, false},
+		{"missing-owner", nil, current, installer, false},
+		{"invalid-owner", invalid, current, installer, false},
+		{"missing-current", installer, nil, installer, false},
+		{"invalid-current", installer, invalid, installer, false},
+		{"unresolved-installer", installer, current, nil, false},
+		{"invalid-installer", installer, current, invalid, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := trustedAncestorOwner(tc.owner, tc.current, tc.installer); got != tc.want {
+				t.Fatalf("ancestor owner accepted=%t want=%t", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestWindowsDescriptorRequiresCurrentOwner(t *testing.T) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
+	}
+	installer, _, _, err := windows.LookupSID("", `NT SERVICE\TrustedInstaller`)
+	if err != nil || installer == nil || !installer.IsValid() {
+		t.Fatal("fixture service SID unavailable")
 	}
 	dacl := "D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")(A;OICI;FA;;;SY)"
 	for _, tc := range []struct {
@@ -197,6 +248,8 @@ func TestWindowsDescriptorRequiresCurrentOwner(t *testing.T) {
 	}{
 		{name: "current user", owner: "O:" + user.User.Sid.String(), want: true},
 		{name: "different owner", owner: "O:SY"},
+		{name: "administrators owner", owner: "O:BA"},
+		{name: "trusted installer owner", owner: "O:" + installer.String()},
 		{name: "unknown owner", owner: "O:S-1-5-21-111-222-333-1234"},
 		{name: "missing owner"},
 	} {

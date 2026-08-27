@@ -121,7 +121,26 @@ func nativeTrustedAncestor(path string) bool {
 		return false
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	return err == nil && (owner.Equals(user.User.Sid) || owner.String() == "S-1-5-18" || owner.String() == "S-1-5-32-544")
+	if err != nil || user.User.Sid == nil || !user.User.Sid.IsValid() {
+		return false
+	}
+	if trustedAncestorOwner(owner, user.User.Sid, nil) {
+		return true
+	}
+	// Resolve only this local OS service, not the All Services group or an
+	// account name derived from input. Resolution failure never grants access.
+	installer, _, _, err := windows.LookupSID("", `NT SERVICE\TrustedInstaller`)
+	return err == nil && trustedAncestorOwner(owner, user.User.Sid, installer)
+}
+
+// installer is nil or the SID resolved for the fixed local TrustedInstaller
+// principal. This allowance is ancestor-only; descriptorPrivate stays strict.
+func trustedAncestorOwner(owner, current, installer *windows.SID) bool {
+	if owner == nil || current == nil || !owner.IsValid() || !current.IsValid() {
+		return false
+	}
+	return owner.Equals(current) || owner.String() == "S-1-5-18" || owner.String() == "S-1-5-32-544" ||
+		(installer != nil && installer.IsValid() && owner.Equals(installer))
 }
 
 func nativeOpen(path string, exclusive bool) (*os.File, error) {
