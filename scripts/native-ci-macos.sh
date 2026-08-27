@@ -89,7 +89,7 @@ filesec_counterfactual() {
     fi
     if ! grep -F -- '--- FAIL: TestDarwinRejectsIncompleteFileSecurity' "$counter_log" >/dev/null ||
         ! grep -F -- 'stage=unfilled result=1' "$counter_log" >/dev/null ||
-        ! grep -E -- 'incomplete filesec accepted|complete no-ACL filesec rejected' "$counter_log" >/dev/null; then
+        ! grep -F -- 'incomplete filesec accepted or complete no-ACL filesec rejected' "$counter_log" >/dev/null; then
         echo "filesec-counterfactual: unexpected failure evidence" >&2
         return 1
     fi

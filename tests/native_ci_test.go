@@ -2,6 +2,8 @@ package tests
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -81,6 +83,7 @@ func TestNativeCIScriptFilesecCounterfactualEvidence(t *testing.T) {
 		wantMarker string
 	}{
 		{name: "expected rejection", mode: "expected", wantCode: 0, wantMarker: "filesec-counterfactual: expected rejection confirmed"},
+		{name: "partial rejection text", mode: "partial", wantCode: 1, wantMarker: "filesec-counterfactual: unexpected failure evidence"},
 		{name: "unexpected pass", mode: "pass", wantCode: 1, wantMarker: "filesec-counterfactual: unexpected pass"},
 		{name: "unrelated failure", mode: "unrelated", wantCode: 1, wantMarker: "filesec-counterfactual: unexpected failure evidence"},
 	} {
@@ -89,14 +92,18 @@ func TestNativeCIScriptFilesecCounterfactualEvidence(t *testing.T) {
 			log := filepath.Join(t.TempDir(), "security.log")
 			fakeSecurity := writeFakeSecurity(t)
 			fakeGoDir := writeFakeGo(t)
+			oldACLHash := historicalFileSHA256(t, "0062d3b1ccc08c2b81112d8c843b8800f3af4df2:internal/store/acl_darwin.go")
+			currentTestHash := localFileSHA256(t, filepath.Join("..", "internal", "store", "files_darwin_test.go"))
 			code, output := runNativeCIScript(t, productionNativeCIScript(t), map[string]string{
-				"CI":                     "true",
-				"RUNNER_TEMP":            runnerTemp,
-				"ATN_TEST_FAKE_SECURITY": "1",
-				"ATN_TEST_SECURITY_BIN":  filepath.ToSlash(fakeSecurity),
-				"ATN_FAKE_SECURITY_LOG":  filepath.ToSlash(log),
-				"ATN_FAKE_FILESEC_MODE":  scenario.mode,
-				"PATH":                   filepath.ToSlash(fakeGoDir) + ";" + os.Getenv("PATH"),
+				"CI":                           "true",
+				"RUNNER_TEMP":                  runnerTemp,
+				"ATN_TEST_FAKE_SECURITY":       "1",
+				"ATN_TEST_SECURITY_BIN":        filepath.ToSlash(fakeSecurity),
+				"ATN_FAKE_SECURITY_LOG":        filepath.ToSlash(log),
+				"ATN_FAKE_FILESEC_MODE":        scenario.mode,
+				"ATN_FAKE_OLD_ACL_SHA256":      oldACLHash,
+				"ATN_FAKE_CURRENT_TEST_SHA256": currentTestHash,
+				"PATH":                         filepath.ToSlash(fakeGoDir) + ";" + os.Getenv("PATH"),
 			})
 			if code != scenario.wantCode || !strings.Contains(output, scenario.wantMarker) {
 				t.Fatalf("unexpected filesec result: code=%d output=%q", code, output)
@@ -242,9 +249,22 @@ func writeFakeGo(t *testing.T) string {
 	const fake = `#!/usr/bin/env bash
 set -eu
 if [[ "$*" == *TestDarwinRejectsIncompleteFileSecurity* ]]; then
+  if test "$*" != 'test -count=1 -v -timeout=45s -run ^TestDarwinRejectsIncompleteFileSecurity$ ./internal/store' ||
+      [[ "$PWD" != */atn-go-tmp.*/filesec-counterfactual ]] ||
+      ! test -f go.mod || ! test -f go.sum ||
+      ! test -f internal/store/files_darwin_test.go ||
+      test "$(sha256sum internal/store/acl_darwin.go | awk '{print $1}')" != "${ATN_FAKE_OLD_ACL_SHA256:?}" ||
+      test "$(sha256sum internal/store/files_darwin_test.go | awk '{print $1}')" != "${ATN_FAKE_CURRENT_TEST_SHA256:?}"; then
+    printf '%s\n' 'filesec fake contract failure'
+    exit 1
+  fi
   case "${ATN_FAKE_FILESEC_MODE:?}" in
     expected)
       printf '%s\n' '--- FAIL: TestDarwinRejectsIncompleteFileSecurity (0.00s)' 'stage=unfilled result=1' 'incomplete filesec accepted or complete no-ACL filesec rejected'
+      exit 1
+      ;;
+    partial)
+      printf '%s\n' '--- FAIL: TestDarwinRejectsIncompleteFileSecurity (0.00s)' 'stage=unfilled result=1' 'incomplete filesec accepted'
       exit 1
       ;;
     pass) exit 0 ;;
@@ -257,6 +277,24 @@ printf '%s\n' '--- PASS: TestDarwinLockedKeychainBackgroundDenial (0.00s)' '--- 
 		t.Fatal(err)
 	}
 	return dir
+}
+
+func historicalFileSHA256(t *testing.T, spec string) string {
+	t.Helper()
+	output, err := exec.Command("git", "show", spec).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(output))
+}
+
+func localFileSHA256(t *testing.T, name string) string {
+	t.Helper()
+	contents, err := os.ReadFile(name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return fmt.Sprintf("%x", sha256.Sum256(contents))
 }
 
 func findLine(t *testing.T, lines []string, parts ...string) int {
