@@ -71,5 +71,32 @@ export TMP="$test_tmp"
 export TEMP="$test_tmp"
 export GOTMPDIR="$test_tmp"
 
+filesec_counterfactual() {
+    local counter_root="$test_tmp/filesec-counterfactual"
+    local counter_log="$fixture_dir/filesec-counterfactual.log"
+    local counter_status=0
+    if ! mkdir -p "$counter_root/internal" 2>/dev/null ||
+        ! cp go.mod go.sum "$counter_root/" 2>/dev/null ||
+        ! cp -R internal/store "$counter_root/internal/" 2>/dev/null ||
+        ! git show 0062d3b1ccc08c2b81112d8c843b8800f3af4df2:internal/store/acl_darwin.go > "$counter_root/internal/store/acl_darwin.go" 2>/dev/null; then
+        echo "filesec-counterfactual: setup failed" >&2
+        return 1
+    fi
+    (cd "$counter_root" && go test -count=1 -v -timeout=45s -run '^TestDarwinRejectsIncompleteFileSecurity$' ./internal/store) > "$counter_log" 2>&1 || counter_status=$?
+    if test "$counter_status" -eq 0; then
+        echo "filesec-counterfactual: unexpected pass" >&2
+        return 1
+    fi
+    if ! grep -F -- '--- FAIL: TestDarwinRejectsIncompleteFileSecurity' "$counter_log" >/dev/null ||
+        ! grep -F -- 'stage=unfilled result=1' "$counter_log" >/dev/null ||
+        ! grep -E -- 'incomplete filesec accepted|complete no-ACL filesec rejected' "$counter_log" >/dev/null; then
+        echo "filesec-counterfactual: unexpected failure evidence" >&2
+        return 1
+    fi
+    echo "filesec-counterfactual: expected rejection confirmed"
+}
+
+filesec_counterfactual
 go test -count=1 -v ./... | tee "$fixture_dir/go-test.log"
 grep -F -- '--- PASS: TestDarwinLockedKeychainBackgroundDenial' "$fixture_dir/go-test.log"
+grep -F -- '--- PASS: TestDarwinRejectsIncompleteFileSecurity' "$fixture_dir/go-test.log"

@@ -28,11 +28,12 @@ func TestNativeCIScriptRestoresAfterPartialConfigurationFailure(t *testing.T) {
 	log := filepath.Join(t.TempDir(), "security.log")
 	fake := writeFakeSecurity(t)
 	code, output := runNativeCIScript(t, productionNativeCIScript(t), map[string]string{
-		"CI":                     "true",
-		"RUNNER_TEMP":            runnerTemp,
-		"ATN_TEST_FAKE_SECURITY": "1",
-		"ATN_TEST_SECURITY_BIN":  filepath.ToSlash(fake),
-		"ATN_FAKE_SECURITY_LOG":  filepath.ToSlash(log),
+		"CI":                             "true",
+		"RUNNER_TEMP":                    runnerTemp,
+		"ATN_TEST_FAKE_SECURITY":         "1",
+		"ATN_TEST_SECURITY_BIN":          filepath.ToSlash(fake),
+		"ATN_FAKE_SECURITY_LOG":          filepath.ToSlash(log),
+		"ATN_FAKE_SECURITY_FAIL_DEFAULT": "1",
 	})
 	if code != 73 {
 		t.Fatalf("expected fake default-keychain failure 73, got %d: %s", code, output)
@@ -72,6 +73,45 @@ func TestNativeWorkflowArtifactNameIncludesMatrixLabelAndRunnerIdentity(t *testi
 	}
 }
 
+func TestNativeCIScriptFilesecCounterfactualEvidence(t *testing.T) {
+	for _, scenario := range []struct {
+		name       string
+		mode       string
+		wantCode   int
+		wantMarker string
+	}{
+		{name: "expected rejection", mode: "expected", wantCode: 0, wantMarker: "filesec-counterfactual: expected rejection confirmed"},
+		{name: "unexpected pass", mode: "pass", wantCode: 1, wantMarker: "filesec-counterfactual: unexpected pass"},
+		{name: "unrelated failure", mode: "unrelated", wantCode: 1, wantMarker: "filesec-counterfactual: unexpected failure evidence"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			runnerTemp := t.TempDir()
+			log := filepath.Join(t.TempDir(), "security.log")
+			fakeSecurity := writeFakeSecurity(t)
+			fakeGoDir := writeFakeGo(t)
+			code, output := runNativeCIScript(t, productionNativeCIScript(t), map[string]string{
+				"CI":                     "true",
+				"RUNNER_TEMP":            runnerTemp,
+				"ATN_TEST_FAKE_SECURITY": "1",
+				"ATN_TEST_SECURITY_BIN":  filepath.ToSlash(fakeSecurity),
+				"ATN_FAKE_SECURITY_LOG":  filepath.ToSlash(log),
+				"ATN_FAKE_FILESEC_MODE":  scenario.mode,
+				"PATH":                   filepath.ToSlash(fakeGoDir) + ";" + os.Getenv("PATH"),
+			})
+			if code != scenario.wantCode || !strings.Contains(output, scenario.wantMarker) {
+				t.Fatalf("unexpected filesec result: code=%d output=%q", code, output)
+			}
+			if _, err := os.Stat(log); err != nil {
+				t.Fatalf("fake fixture did not run: %v", err)
+			}
+			remaining, err := os.ReadDir(runnerTemp)
+			if err != nil || len(remaining) != 0 {
+				t.Fatalf("generated directories were not cleaned: entries=%v err=%v", remaining, err)
+			}
+		})
+	}
+}
+
 func guardScriptForTest(t *testing.T) string {
 	t.Helper()
 	script := productionNativeCIScript(t)
@@ -101,7 +141,11 @@ fi
 
 func productionNativeCIScript(t *testing.T) string {
 	t.Helper()
-	return filepath.Join("..", "scripts", "native-ci-macos.sh")
+	script, err := filepath.Abs(filepath.Join("..", "scripts", "native-ci-macos.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return script
 }
 
 func assertNonCIRefusal(t *testing.T, code int, output, log string) {
@@ -125,6 +169,11 @@ func runNativeCIScript(t *testing.T, script string, extra map[string]string) (in
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bash, script)
+	root, err := filepath.Abs("..")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd.Dir = root
 	cmd.Env = withoutNativeCIEnvironment(os.Environ())
 	for key, value := range extra {
 		cmd.Env = append(cmd.Env, key+"="+value)
@@ -148,7 +197,7 @@ func withoutNativeCIEnvironment(env []string) []string {
 	for _, entry := range env {
 		key, _, _ := strings.Cut(entry, "=")
 		switch key {
-		case "CI", "RUNNER_TEMP", "ATN_TEST_FAKE_SECURITY", "ATN_TEST_SECURITY_BIN", "ATN_FAKE_SECURITY_LOG":
+		case "CI", "RUNNER_TEMP", "ATN_TEST_FAKE_SECURITY", "ATN_TEST_SECURITY_BIN", "ATN_FAKE_SECURITY_LOG", "ATN_FAKE_SECURITY_FAIL_DEFAULT", "ATN_FAKE_FILESEC_MODE":
 			continue
 		}
 		filtered = append(filtered, entry)
@@ -173,7 +222,7 @@ case "$command" in
   default-keychain)
     if test "$*" = "-d user"; then
       printf '"old-default.keychain-db"\n'
-    elif [[ "$*" == *synthetic.keychain-db ]]; then
+    elif [[ "$*" == *synthetic.keychain-db && "${ATN_FAKE_SECURITY_FAIL_DEFAULT:-}" = 1 ]]; then
       exit 73
     fi
     ;;
@@ -184,6 +233,30 @@ esac
 		t.Fatal(err)
 	}
 	return path
+}
+
+func writeFakeGo(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "go")
+	const fake = `#!/usr/bin/env bash
+set -eu
+if [[ "$*" == *TestDarwinRejectsIncompleteFileSecurity* ]]; then
+  case "${ATN_FAKE_FILESEC_MODE:?}" in
+    expected)
+      printf '%s\n' '--- FAIL: TestDarwinRejectsIncompleteFileSecurity (0.00s)' 'stage=unfilled result=1' 'incomplete filesec accepted or complete no-ACL filesec rejected'
+      exit 1
+      ;;
+    pass) exit 0 ;;
+    unrelated) printf '%s\n' 'unrelated compiler failure'; exit 1 ;;
+  esac
+fi
+printf '%s\n' '--- PASS: TestDarwinLockedKeychainBackgroundDenial (0.00s)' '--- PASS: TestDarwinRejectsIncompleteFileSecurity (0.00s)'
+`
+	if err := os.WriteFile(path, []byte(fake), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func findLine(t *testing.T, lines []string, parts ...string) int {
