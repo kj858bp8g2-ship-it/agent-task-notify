@@ -37,10 +37,12 @@ async function jobs(directory) {
   let names=[];try { names=await fs.readdir(path.join(directory,'jobs')); } catch { return []; }
   return Promise.all(names.filter(n=>n.endsWith('.json')).map(async name=>({key:name.slice(0,-5),...JSON.parse(await fs.readFile(path.join(directory,'jobs',name),'utf8'))})));
 }
+const durableStateTimeoutMessage='Expected durable state was not reached';
+const durableStateTimeoutCode='ATN_TEST_DURABLE_STATE_TIMEOUT';
 async function eventually(read,predicate,timeout=15000) {
   const deadline=Date.now()+timeout;
   while(Date.now()<deadline) { const value=await read();if(predicate(value))return value;await delay(100); }
-  throw new Error('Expected durable state was not reached');
+  throw Object.assign(new Error(durableStateTimeoutMessage),{code:durableStateTimeoutCode});
 }
 const retryCapStatus=new Set(['pending','sending','sent','failed']);
 const retryCapDiagnostic=new Set(['http:400','http:401','http:403','http:404','http:408','http:429','http:500','http:502','http:503','http:504','ambiguous-send']);
@@ -61,6 +63,10 @@ function retryCapSnapshot(rawJobs,rawRequestElapsedMs,rawElapsedMs) {
     elapsedMs:retryCapBound(rawElapsedMs)
   };
 }
+function retryCapFailure(error,rawJobs,rawRequestElapsedMs,rawElapsedMs) {
+  if(error?.code!==durableStateTimeoutCode||error.message!==durableStateTimeoutMessage)return error;
+  return new Error(`${durableStateTimeoutMessage}; retry-cap-snapshot=${JSON.stringify(retryCapSnapshot(rawJobs,rawRequestElapsedMs,rawElapsedMs))}`);
+}
 
 test('retry-cap diagnostic snapshot is fixed-schema, bounded, and redacted',()=> {
   const snapshot=retryCapSnapshot([
@@ -80,6 +86,17 @@ test('retry-cap diagnostic snapshot is fixed-schema, bounded, and redacted',()=>
     elapsedMs:180000
   });
   assert.doesNotMatch(JSON.stringify(snapshot),/PRIVATE|https|secret|jobKey|rawResponse/);
+});
+
+test('retry-cap diagnostic decorates only the durable-state timeout',()=> {
+  const timeout=new Error('Expected durable state was not reached');
+  timeout.code='ATN_TEST_DURABLE_STATE_TIMEOUT';
+  const decorated=retryCapFailure(timeout,[],[],0);
+  assert.notEqual(decorated,timeout);
+  assert.match(decorated.message,/retry-cap-snapshot=/);
+  const readFailure=new SyntaxError('unexpected synthetic JSON');
+  assert.equal(retryCapFailure(readFailure,[],[],0),readFailure);
+  assert.equal(readFailure.message,'unexpected synthetic JSON');
 });
 
 test('invalid input is neutral and Doctor exposes only bounded fixed input classes', async()=> {
@@ -158,9 +175,9 @@ test('real worker reaches five-attempt cap and permanent rejection never retries
     await hook(directory,input);await delay(1100);const retryCapStartedAt=Date.now();await hook(directory,{...input,hook_event_name:'Stop'});
     let done;
     try { done=(await eventually(()=>jobs(directory),j=>j[0]?.status==='failed',130000))[0]; }
-    catch {
-      const snapshot=retryCapSnapshot(await jobs(directory),requests.map(at=>at-retryCapStartedAt),Date.now()-retryCapStartedAt);
-      throw new Error(`Expected durable state was not reached; retry-cap-snapshot=${JSON.stringify(snapshot)}`);
+    catch(error) {
+      if(error?.code!==durableStateTimeoutCode||error.message!==durableStateTimeoutMessage)throw error;
+      throw retryCapFailure(error,await jobs(directory),requests.map(at=>at-retryCapStartedAt),Date.now()-retryCapStartedAt);
     }
     assert.equal(done.attempts,5);assert.equal(done.diagnostic,'http:503');assert.equal(requests.length,5);
     for(const [i,min] of [[1,4800],[2,14800],[3,29800],[4,59800]])assert.ok(requests[i]-requests[i-1]>=min);
