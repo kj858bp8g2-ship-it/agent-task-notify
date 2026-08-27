@@ -2,6 +2,7 @@ package tests
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -111,6 +112,66 @@ func TestNativeCIScriptCleanupExitStatus(t *testing.T) {
 	}
 }
 
+func TestNativeCIScriptCleanupObserverTransform(t *testing.T) {
+	contents, err := os.ReadFile(productionNativeCIScript(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutSetup := strings.Replace(string(contents), nativeCIShellSetup, "", 1)
+	tests := []struct {
+		name     string
+		contents []byte
+		wantErr  bool
+	}{
+		{name: "LF", contents: contents},
+		{name: "CRLF", contents: []byte(strings.ReplaceAll(string(contents), "\n", "\r\n"))},
+		{name: "missing setup", contents: []byte(withoutSetup), wantErr: true},
+		{name: "repeated setup", contents: []byte(nativeCIShellSetup + string(contents)), wantErr: true},
+	}
+	var lfTransformed string
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transformed, err := nativeCIScriptWithCleanupObserverContents(test.contents)
+			if test.wantErr {
+				if err == nil || err.Error() != nativeCICleanupObserverSetupError {
+					t.Fatalf("unexpected transform error: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := string(transformed)
+			if strings.Count(got, nativeCIShellSetup) != 1 || strings.Count(got, "rm() {") != 1 {
+				t.Fatalf("cleanup observer was not injected exactly once: %q", got)
+			}
+			if !strings.Contains(got, "cleanup_on_exit() {") || !strings.Contains(got, "filesec_counterfactual\n") {
+				t.Fatal("cleanup wrapper or production test body was not retained")
+			}
+			if test.name == "LF" {
+				lfTransformed = got
+			} else if got != lfTransformed {
+				t.Fatal("LF and CRLF production templates transformed differently")
+			}
+		})
+	}
+}
+
+func TestNativeCIScriptCleanupObserverRunsCRLFScript(t *testing.T) {
+	contents, err := os.ReadFile(productionNativeCIScript(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := nativeCIScriptWithCleanupObserverFromContents(t, []byte(strings.ReplaceAll(string(contents), "\n", "\r\n")))
+	runnerTemp, log, env := nativeCIFakeFixture(t)
+	env["ATN_FAKE_SECURITY_FAIL_DEFAULT"] = "1"
+	code, output := runNativeCIScript(t, script, env)
+	if code != 73 {
+		t.Fatalf("CRLF cleanup-observer copy hid body failure 73: code=%d output=%s", code, output)
+	}
+	assertNativeCICleanup(t, runnerTemp, log, true, "")
+}
+
 func nativeCIFakeFixture(t *testing.T) (string, string, map[string]string) {
 	t.Helper()
 	runnerTemp := t.TempDir()
@@ -143,7 +204,10 @@ func nativeCIScriptWithCleanupObserver(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	const observer = `
+	return nativeCIScriptWithCleanupObserverFromContents(t, contents)
+}
+
+const nativeCICleanupObserver = `
 rm() {
   local target="${!#}" step
   if test "$#" -ne 3 || test "$1" != -rf || test "$2" != --; then return 99; fi
@@ -157,12 +221,28 @@ rm() {
   command rm "$@"
 }
 `
-	const setup = "set -euo pipefail\n"
-	if strings.Count(string(contents), setup) != 1 {
-		t.Fatal("cannot locate shell setup for cleanup observation")
+
+const (
+	nativeCIShellSetup                = "set -euo pipefail\n"
+	nativeCICleanupObserverSetupError = "cannot locate shell setup for cleanup observation"
+)
+
+func nativeCIScriptWithCleanupObserverContents(contents []byte) ([]byte, error) {
+	source := strings.ReplaceAll(string(contents), "\r\n", "\n")
+	if strings.Count(source, nativeCIShellSetup) != 1 {
+		return nil, errors.New(nativeCICleanupObserverSetupError)
+	}
+	return []byte(strings.Replace(source, nativeCIShellSetup, nativeCIShellSetup+nativeCICleanupObserver, 1)), nil
+}
+
+func nativeCIScriptWithCleanupObserverFromContents(t *testing.T, contents []byte) string {
+	t.Helper()
+	transformed, err := nativeCIScriptWithCleanupObserverContents(contents)
+	if err != nil {
+		t.Fatal(err)
 	}
 	script := filepath.Join(t.TempDir(), "native-ci-cleanup-copy.sh")
-	if err := os.WriteFile(script, []byte(strings.Replace(string(contents), setup, setup+observer, 1)), 0o700); err != nil {
+	if err := os.WriteFile(script, transformed, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return script
