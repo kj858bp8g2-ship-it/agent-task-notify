@@ -1,0 +1,60 @@
+name: Native foundation gates
+
+on:
+  push:
+    branches:
+      - feature/native-*
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-15, macos-15-intel, macos-26, macos-26-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.0'
+          check-latest: false
+      - name: Verify modules
+        run: go mod verify
+      - name: Run native test gates on macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: bash scripts/native-ci-macos.sh
+      - name: Run native test gates on Windows
+        if: runner.os == 'Windows'
+        run: go test -count=1 ./...
+      - name: Vet native source
+        run: go vet ./...
+      - name: Build unsigned candidate
+        id: candidate
+        shell: pwsh
+        run: |
+          $candidate = Join-Path $env:RUNNER_TEMP 'atn-native-candidate'
+          New-Item -ItemType Directory -Force -Path $candidate | Out-Null
+          $suffix = if ($env:RUNNER_OS -eq 'Windows') { '.exe' } else { '' }
+          go build -trimpath -o (Join-Path $candidate "agent-task-notify$suffix") ./cmd/agent-task-notify
+          if ($env:RUNNER_OS -eq 'macOS') {
+            $notice = @(
+              'UNSIGNED CANDIDATE — CI test artifact only.',
+              'This artifact is not notarized or signed for end-user distribution.',
+              'No Gatekeeper or quarantine bypass instructions are provided.'
+            ) -join "`n"
+            [IO.File]::WriteAllText((Join-Path $candidate 'UNSIGNED-CANDIDATE.txt'), "$notice`n", [Text.UTF8Encoding]::new($false))
+          }
+          "path=$candidate" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+      - name: Upload candidate artifact
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+        with:
+          name: native-candidate-${{ runner.os }}-${{ runner.arch }}
+          path: ${{ steps.candidate.outputs.path }}
+          if-no-files-found: error

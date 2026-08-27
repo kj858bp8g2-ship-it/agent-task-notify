@@ -29,5 +29,8 @@
   "internal/worker/spawn_darwin.go",
   "internal/worker/delivery.go",
   "internal/worker/spawn_test.go",
-  "internal/worker/delivery_test.go"
+  "internal/worker/delivery_test.go",
+  ".github/workflows/native.yml",
+  "scripts/native-ci-macos.sh",
+  "docs/native-validation.md"
 ]
