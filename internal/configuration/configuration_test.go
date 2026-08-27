@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -377,14 +378,17 @@ func TestRejectedConfigurationPreservesBundle(t *testing.T) {
 		}
 		defer reader.Close()
 	} else {
-		if err := exec.Command("/bin/chflags", "uchg", path).Run(); err != nil {
-			t.Fatal("immutable fixture setup failed")
-		}
+		// Keep the old launch-path evidence separate from the real flag operation.
+		_, legacyErr := os.Lstat("/bin/chflags")
+		t.Logf("stage=immutable-legacy-command exists=%t missing=%t", legacyErr == nil, os.IsNotExist(legacyErr))
 		defer func() {
-			if exec.Command("/bin/chflags", "nouchg", path).Run() != nil {
-				t.Error("immutable fixture cleanup failed")
+			if category, code := immutableFixtureCommand(path, "nouchg"); category != "ok" {
+				t.Errorf("stage=immutable-cleanup category=%s exit=%d", category, code)
 			}
 		}()
+		if category, code := immutableFixtureCommand(path, "uchg"); category != "ok" {
+			t.Fatalf("stage=immutable-setup category=%s exit=%d", category, code)
+		}
 	}
 	if err := r.Configure(context.Background(), "ntfy", ntfyFixture, []byte(`{"volume":2}`)); err == nil {
 		t.Fatal("blocked commit succeeded")
@@ -403,6 +407,30 @@ func TestRejectedConfigurationPreservesBundle(t *testing.T) {
 		if strings.HasPrefix(entry.Name(), ".tmp-") {
 			t.Fatal("failed commit leaked temporary")
 		}
+	}
+}
+
+// Only this synthetic fixture invokes chflags. Neither native error text nor
+// subprocess output is logged, and cleanup has the same bounded lifetime.
+func immutableFixtureCommand(path, flag string) (string, int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	err := exec.CommandContext(ctx, "/usr/bin/chflags", flag, path).Run()
+	switch {
+	case ctx.Err() != nil:
+		return "timeout", -1
+	case err == nil:
+		return "ok", 0
+	case errors.Is(err, os.ErrNotExist):
+		return "missing", -1
+	case errors.Is(err, os.ErrPermission):
+		return "access", -1
+	default:
+		var exited *exec.ExitError
+		if errors.As(err, &exited) {
+			return "exit", exited.ExitCode()
+		}
+		return "other", -1
 	}
 }
 

@@ -27,6 +27,69 @@ func readForReplacement(path string) ([]byte, error) {
 	return io.ReadAll(file)
 }
 
+// Inspect only a synthetic fixture and its ancestors. This diagnoses the exact
+// safety stage without changing the owner allowlist or logging paths/SIDs.
+func TestWindowsPrivateDirectoryNativeStages(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal("stage=fixture-root category=unavailable")
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal("stage=current-user category=unavailable")
+	}
+	// A local known service is diagnostic only, never an accepted state owner.
+	installer, _, _, installerErr := windows.LookupSID("", `NT SERVICE\TrustedInstaller`)
+	t.Logf("stage=service-lookup available=%t", installerErr == nil)
+	for current, depth := root, 0; ; current, depth = filepath.Dir(current), depth+1 {
+		info, statErr := os.Lstat(current)
+		ownerCategory := "query-error"
+		sd, ownerErr := windows.GetNamedSecurityInfo(current, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+		if ownerErr == nil {
+			owner, _, getErr := sd.Owner()
+			if getErr != nil || owner == nil || !owner.IsValid() {
+				ownerCategory = "invalid"
+			} else {
+				switch {
+				case owner.Equals(user.User.Sid):
+					ownerCategory = "current"
+				case owner.String() == "S-1-5-18":
+					ownerCategory = "system"
+				case owner.String() == "S-1-5-32-544":
+					ownerCategory = "administrators"
+				case installerErr == nil && installer != nil && owner.Equals(installer):
+					ownerCategory = "trusted-installer"
+				default:
+					ownerCategory = "other"
+				}
+			}
+		}
+		t.Logf("stage=ancestor depth=%d stat=%t directory=%t reparse=%t owner=%s trusted=%t", depth,
+			statErr == nil, statErr == nil && info.IsDir(), nativeReparse(current), ownerCategory, nativeTrustedAncestor(current))
+		if filepath.Dir(current) == current {
+			break
+		}
+	}
+	owned := filepath.Join(root, "native-stage-owned")
+	if _, err := os.Lstat(owned); !os.IsNotExist(err) {
+		t.Fatal("stage=owned-leaf category=not-missing")
+	}
+	before := safePath(owned, true)
+	t.Logf("stage=safe-before accepted=%t", before)
+	// This one missing leaf is owned by t.TempDir even when an ancestor is
+	// rejected. Never secure, rename, or otherwise mutate any ancestor.
+	if err := nativeMkdir(owned); err != nil {
+		t.Fatalf("stage=native-mkdir category=%s", nativeErrorCategory(err))
+	}
+	t.Log("stage=native-mkdir category=ok")
+	after, private := safePath(owned, false), nativePrivate(owned, true)
+	t.Logf("stage=safe-after accepted=%t", after)
+	t.Logf("stage=native-private accepted=%t", private)
+	if !before || !after || !private {
+		t.Fatal("stage=private-directory category=rejected")
+	}
+}
+
 func TestWindowsFinishOpenCleansOnlyNewName(t *testing.T) {
 	for _, created := range []bool{true, false} {
 		path := filepath.Join(privateDir(t), "owned-name")
