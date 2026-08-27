@@ -1,7 +1,7 @@
 const {test} = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('node:http');
-const {spawn} = require('node:child_process');
+let {spawn} = require('node:child_process');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
@@ -56,6 +56,11 @@ function signaledProcess(code,timeout=15000) {
     release(){child.stdin.end('ATN_RELEASE\n');},
     async stop(){if(!closed)child.kill();await completion;}
   };
+}
+async function setupLockProcess(children,code,timeout=15000) {
+  const setup=signaledProcess("$ErrorActionPreference='Stop'; "+code,timeout);
+  children.push(setup);
+  assert.deepEqual(await setup.completion,{code:0,stderrEmpty:true,timedOut:false});
 }
 async function hook(directory,event) {
   // CP936 intentionally contradicts the UTF-8 bytes written to stdin.
@@ -134,6 +139,42 @@ test('retry-cap diagnostic distinguishes no diagnostic and fixed startup failure
   assert.deepEqual(diagnostics.map(diagnostic=>retryCapSnapshot([{status:'pending',attempts:0,diagnostic}],[],0).jobs[0].diagnostic),['none','none','spawn-failed','credential','worker-error','ambiguous-send','other']);
 });
 
+test('lock setup timeout closes before temporary directory removal',{timeout:15000},async t=> {
+  const temporaryParent=path.resolve(os.tmpdir());
+  const directory=await fs.mkdtemp(path.join(temporaryParent,'atn-lock-'));
+  const children=[],observed=[],sequence=[];
+  const originalSpawn=spawn;
+  let output='';
+  // Observe real close events independently of the setup helper, including RED cleanup.
+  spawn=(...args)=> {
+    const child=originalSpawn(...args),record={child,closed:false};
+    record.completion=new Promise(resolve=>child.once('close',()=>{record.closed=true;sequence.push('close');resolve();}));
+    child.stdout.on('data',chunk=>output+=chunk.toString('utf8'));
+    observed.push(record);
+    return child;
+  };
+  try {
+    await assert.rejects(setupLockProcess(children,`$held=[IO.File]::Open(${quote(path.join(directory,'synthetic.lock'))},[IO.FileMode]::Create,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None); try { [Console]::WriteLine('ATN_SETUP_READY'); Start-Sleep -Seconds 60 } finally { $held.Dispose() }`,5000));
+    assert.match(output,/ATN_SETUP_READY/,'The real setup must reach its open-file gate before timing out');
+    await Promise.all(children.map(child=>child.stop()));
+    assert.deepEqual([...sequence],['close'],'Setup close must precede permission to remove its temporary directory');
+  } finally {
+    spawn=originalSpawn;
+    assert.equal(spawn,originalSpawn,'The real spawn function is restored');
+    // Also reap independently observed children if the regression fails before registration.
+    for(const record of observed)if(!record.closed)record.child.kill();
+    await Promise.all(observed.map(record=>record.completion));
+    const absolute=path.resolve(directory);
+    assert.equal(path.dirname(absolute),temporaryParent);
+    assert.ok(path.basename(absolute).startsWith('atn-lock-'));
+    sequence.push('remove');
+    await fs.rm(absolute,{recursive:true,force:true});
+  }
+  assert.deepEqual(sequence,['close','remove']);
+  assert.equal(await fs.stat(directory).then(()=>true,()=>false),false);
+  t.diagnostic('setup-timeout order=close,remove directoryRemoved=true spawnRestored=true');
+});
+
 for(const releaseShortLock of [true,false]) {
   test(releaseShortLock?'real worker waits through a short maintenance lock and sends once':'real worker bounds startup waiting while a long lock keeps the job pending',{timeout:30000},async t=> {
     const temporaryParent=path.resolve(os.tmpdir());
@@ -143,7 +184,7 @@ for(const releaseShortLock of [true,false]) {
     const server=http.createServer(async(req,res)=>{for await(const chunk of req){}requests++;res.writeHead(200,{'Content-Type':'application/json'});res.end('{"code":200}');});
     try {
       await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
-      await script(`$runtime=Import-Module ./src/Runtime.psm1 -PassThru; Import-Module ./src/Storage.psm1; Set-ATNCredential ${quote(directory)} bark @{endpoint='http://127.0.0.1:${server.address().port}/synthetic-key'}; & $runtime { param($directory,$key) $job=New-ATNJob codex (Get-ATNSettings $directory) 300 stopped ([DateTimeOffset]::UtcNow) -RingSeconds 30; Write-ATNJson (Join-Path $directory "jobs/$key.json") $job } ${quote(directory)} ${quote(key)}`);
+      await setupLockProcess(children,`$runtime=Import-Module ./src/Runtime.psm1 -PassThru; Import-Module ./src/Storage.psm1; Set-ATNCredential ${quote(directory)} bark @{endpoint='http://127.0.0.1:${server.address().port}/synthetic-key'}; & $runtime { param($directory,$key) $job=New-ATNJob codex (Get-ATNSettings $directory) 300 stopped ([DateTimeOffset]::UtcNow) -RingSeconds 30; Write-ATNJson (Join-Path $directory "jobs/$key.json") $job } ${quote(directory)} ${quote(key)}`);
       const before=await jobs(directory);
       const holder=signaledProcess(`$ErrorActionPreference='Stop'; Import-Module ./src/Storage.psm1; $held=Enter-ATNLock ${quote(path.join(directory,'jobs',key+'.json.lock'))}; if($null -eq $held){throw 'Synthetic lock unavailable'}; try { [Console]::WriteLine('ATN_LOCK_READY'); if([Console]::ReadLine() -cne 'ATN_RELEASE'){throw 'Synthetic release missing'} } finally { $held.Dispose() }; [Console]::WriteLine('ATN_LOCK_RELEASED')`);
       children.push(holder);
