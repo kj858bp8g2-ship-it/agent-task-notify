@@ -1,0 +1,20 @@
+{
+  "name": "agent-task-notify",
+  "version": "0.1.0",
+  "description": "Private Windows notifications for long local Agent tasks.",
+  "author": { "name": "Agent Task Notify Contributors", "url": "https://github.com/kj858bp8g2-ship-it/agent-task-notify" },
+  "homepage": "https://github.com/kj858bp8g2-ship-it/agent-task-notify",
+  "repository": "https://github.com/kj858bp8g2-ship-it/agent-task-notify",
+  "license": "MIT",
+  "keywords": ["notifications", "windows", "hooks", "bark", "ntfy"],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Agent Task Notify",
+    "shortDescription": "Private alerts for long local Agent tasks.",
+    "longDescription": "Configure reviewed local task notifications without exposing device credentials to chat.",
+    "developerName": "Agent Task Notify Contributors",
+    "category": "Productivity",
+    "capabilities": ["Interactive"],
+    "defaultPrompt": ["Use Agent Task Notify to safely configure a local notification adapter."]
+  }
+}
