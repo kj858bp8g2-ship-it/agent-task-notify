@@ -63,6 +63,177 @@ func TestNativeCIScriptRestoresAfterPartialConfigurationFailure(t *testing.T) {
 	}
 }
 
+func TestNativeCIScriptRejectsEmptyBackupsBeforeMutation(t *testing.T) {
+	for _, empty := range []string{"search", "default"} {
+		t.Run(empty, func(t *testing.T) {
+			runnerTemp, log, env := nativeCIFakeFixture(t)
+			env["ATN_FAKE_SECURITY_EMPTY_BACKUP"] = empty
+			code, output := runNativeCIScript(t, nativeCIScriptWithCleanupObserver(t), env)
+			if code == 0 {
+				t.Errorf("empty %s backup allowed a successful run: %s", empty, output)
+			}
+			entries, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(entries), "-d user -s") {
+				t.Errorf("empty %s backup allowed Keychain configuration mutation: %s", empty, entries)
+			}
+			assertNativeCICleanup(t, runnerTemp, log, false, "")
+		})
+	}
+}
+
+func TestNativeCIScriptCleanupExitStatus(t *testing.T) {
+	for _, body := range []string{"success", "failure73"} {
+		for _, failure := range []string{"none", "default", "search", "unlock", "delete", "fixture", "tmp", "all"} {
+			t.Run(body+"/"+failure, func(t *testing.T) {
+				runnerTemp, log, env := nativeCIFakeFixture(t)
+				env["ATN_FAKE_CLEANUP_FAILURE"] = failure
+				if body == "failure73" {
+					env["ATN_FAKE_SECURITY_FAIL_DEFAULT"] = "1"
+				}
+				code, output := runNativeCIScript(t, nativeCIScriptWithCleanupObserver(t), env)
+				if body == "failure73" {
+					if code != 73 {
+						t.Errorf("cleanup hid original body failure 73: code=%d output=%s", code, output)
+					}
+				} else if failure == "none" {
+					if code != 0 {
+						t.Errorf("successful body and cleanup failed: code=%d output=%s", code, output)
+					}
+				} else if code == 0 {
+					t.Errorf("cleanup %s failure did not fail successful body: %s", failure, output)
+				}
+				assertNativeCICleanup(t, runnerTemp, log, true, failure)
+			})
+		}
+	}
+}
+
+func nativeCIFakeFixture(t *testing.T) (string, string, map[string]string) {
+	t.Helper()
+	runnerTemp := t.TempDir()
+	if err := os.WriteFile(filepath.Join(runnerTemp, "unrelated"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	log := filepath.Join(t.TempDir(), "security.log")
+	fakeGoDir := writeFakeGo(t)
+	oldACL, currentTest := writeExpectedNativeCIInputs(t)
+	return runnerTemp, log, map[string]string{
+		"CI":                         "true",
+		"RUNNER_TEMP":                runnerTemp,
+		"ATN_TEST_FAKE_SECURITY":     "1",
+		"ATN_TEST_SECURITY_BIN":      filepath.ToSlash(writeFakeSecurity(t)),
+		"ATN_FAKE_SECURITY_LOG":      filepath.ToSlash(log),
+		"ATN_FAKE_FILESEC_MODE":      "expected",
+		"ATN_FAKE_OLD_ACL_FILE":      filepath.ToSlash(oldACL),
+		"ATN_FAKE_CURRENT_TEST_FILE": filepath.ToSlash(currentTest),
+		"ATN_TEST_FAKE_GO_DIR":       filepath.ToSlash(fakeGoDir),
+		"ATN_FAKE_GO_LOG":            filepath.ToSlash(filepath.Join(t.TempDir(), "go.log")),
+		"PATH":                       filepath.ToSlash(fakeGoDir) + string(os.PathListSeparator) + os.Getenv("PATH"),
+	}
+}
+
+// The production script is executed unchanged except for this local rm boundary.
+// It observes/fails only the two generated cleanup directories, never other paths.
+func nativeCIScriptWithCleanupObserver(t *testing.T) string {
+	t.Helper()
+	contents, err := os.ReadFile(productionNativeCIScript(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const observer = `
+rm() {
+  local target="${!#}" step
+  if test "$#" -ne 3 || test "$1" != -rf || test "$2" != --; then return 99; fi
+  case "$target" in
+    "$fixture_dir") step=fixture ;;
+    "$test_tmp") step=tmp ;;
+    *) return 99 ;;
+  esac
+  printf '%s\n' "cleanup-rm $*" >> "${ATN_FAKE_SECURITY_LOG:?}"
+  if test "${ATN_FAKE_CLEANUP_FAILURE:-}" = "$step" || test "${ATN_FAKE_CLEANUP_FAILURE:-}" = all; then return 74; fi
+  command rm "$@"
+}
+`
+	const setup = "set -euo pipefail\n"
+	if strings.Count(string(contents), setup) != 1 {
+		t.Fatal("cannot locate shell setup for cleanup observation")
+	}
+	script := filepath.Join(t.TempDir(), "native-ci-cleanup-copy.sh")
+	if err := os.WriteFile(script, []byte(strings.Replace(string(contents), setup, setup+observer, 1)), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return script
+}
+
+func assertNativeCICleanup(t *testing.T, runnerTemp, log string, mutated bool, failure string) {
+	t.Helper()
+	entries, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(entries)), "\n")
+	const create = "create-keychain -p atn-synthetic-ci-fixture-only "
+	if !strings.HasPrefix(lines[0], create) {
+		t.Fatalf("missing generated fixture creation: %q", lines)
+	}
+	keychain := strings.TrimPrefix(lines[0], create)
+	fixture := strings.TrimSuffix(keychain, "/synthetic.keychain-db")
+	if fixture == keychain || !strings.HasPrefix(filepath.Base(fixture), "atn-keychain.") {
+		t.Fatalf("unexpected generated Keychain path: %q", keychain)
+	}
+	const rm = "cleanup-rm -rf -- "
+	tmp := strings.TrimPrefix(lines[len(lines)-1], rm)
+	if !strings.HasPrefix(filepath.Base(tmp), "atn-go-tmp.") || filepath.Dir(tmp) != filepath.Dir(fixture) {
+		t.Fatalf("unexpected generated temporary path: %q", tmp)
+	}
+	want := []string{
+		create + keychain,
+		"set-keychain-settings -lut 3600 " + keychain,
+		"unlock-keychain -p atn-synthetic-ci-fixture-only " + keychain,
+		"list-keychains -d user",
+		"default-keychain -d user",
+	}
+	if mutated {
+		want = append(want,
+			"list-keychains -d user -s "+keychain,
+			"default-keychain -d user -s "+keychain,
+			"default-keychain -d user -s old-default.keychain-db",
+			"list-keychains -d user -s old-search.keychain-db")
+	}
+	want = append(want,
+		"unlock-keychain -p atn-synthetic-ci-fixture-only "+keychain,
+		"delete-keychain "+keychain, rm+fixture, rm+tmp)
+	if strings.Join(lines, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("cleanup did not attempt every action in order on exact generated paths: got=%q want=%q", lines, want)
+	}
+	remaining, err := os.ReadDir(runnerTemp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantRemaining := map[string]bool{"unrelated": true}
+	if failure == "fixture" || failure == "all" {
+		wantRemaining[filepath.Base(fixture)] = true
+	}
+	if failure == "tmp" || failure == "all" {
+		wantRemaining[filepath.Base(tmp)] = true
+	}
+	if len(remaining) != len(wantRemaining) {
+		t.Fatalf("unexpected cleanup leftovers: %v", remaining)
+	}
+	for _, entry := range remaining {
+		if !wantRemaining[entry.Name()] {
+			t.Fatalf("unexpected leftover %q", entry.Name())
+		}
+	}
+	unchanged, err := os.ReadFile(filepath.Join(runnerTemp, "unrelated"))
+	if err != nil || string(unchanged) != "keep" {
+		t.Fatal("cleanup changed unrelated runner data")
+	}
+}
+
 func TestNativeWorkflowArtifactNameIncludesMatrixLabelAndRunnerIdentity(t *testing.T) {
 	workflow, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "native.yml"))
 	if err != nil {
@@ -272,6 +443,8 @@ func withoutNativeCIEnvironment(env []string) []string {
 	for _, entry := range env {
 		key, _, _ := strings.Cut(entry, "=")
 		switch key {
+		case "ATN_FAKE_SECURITY_EMPTY_BACKUP", "ATN_FAKE_CLEANUP_FAILURE":
+			continue
 		case "CI", "RUNNER_TEMP", "ATN_TEST_FAKE_SECURITY", "ATN_TEST_SECURITY_BIN", "ATN_FAKE_SECURITY_LOG", "ATN_FAKE_SECURITY_FAIL_DEFAULT", "ATN_FAKE_FILESEC_MODE", "ATN_TEST_FAKE_GO_DIR", "ATN_FAKE_GO_LOG", "ATN_FAKE_OLD_ACL_FILE", "ATN_FAKE_CURRENT_TEST_FILE", "ATN_WRONG_GO_LOG":
 			continue
 		}
@@ -289,19 +462,31 @@ printf '%s\n' "$*" >> "${ATN_FAKE_SECURITY_LOG:?}"
 command=$1
 shift
 last="${!#}"
+cleanup_failure() {
+  if test "${ATN_FAKE_CLEANUP_FAILURE:-}" = "$1" || test "${ATN_FAKE_CLEANUP_FAILURE:-}" = all; then exit 74; fi
+}
 case "$command" in
   create-keychain) : > "$last" ;;
   list-keychains)
-    if test "$*" = "-d user"; then printf '"old-search.keychain-db"\n'; fi
+    if test "$*" = "-d user"; then
+      if test "${ATN_FAKE_SECURITY_EMPTY_BACKUP:-}" != search; then printf '"old-search.keychain-db"\n'; fi
+    elif test "$*" = "-d user -s old-search.keychain-db"; then
+      cleanup_failure search
+    fi
     ;;
   default-keychain)
     if test "$*" = "-d user"; then
-      printf '"old-default.keychain-db"\n'
+      if test "${ATN_FAKE_SECURITY_EMPTY_BACKUP:-}" != default; then printf '"old-default.keychain-db"\n'; fi
+    elif test "$*" = "-d user -s old-default.keychain-db"; then
+      cleanup_failure default
     elif [[ "$*" == *synthetic.keychain-db && "${ATN_FAKE_SECURITY_FAIL_DEFAULT:-}" = 1 ]]; then
       exit 73
     fi
     ;;
-  delete-keychain) rm -f -- "$last" ;;
+  unlock-keychain)
+    if test "$(grep -c '^unlock-keychain ' "$ATN_FAKE_SECURITY_LOG")" -gt 1; then cleanup_failure unlock; fi
+    ;;
+  delete-keychain) cleanup_failure delete; rm -f -- "$last" ;;
 esac
 `
 	if err := os.WriteFile(path, []byte(fake), 0o700); err != nil {

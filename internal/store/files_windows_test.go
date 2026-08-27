@@ -48,7 +48,7 @@ func makeTargetNonPrivate(t *testing.T, path string) {
 
 func targetAccessSnapshot(t *testing.T, path string) string {
 	t.Helper()
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func targetAccessSnapshot(t *testing.T, path string) string {
 // Independently inspect the kernel descriptor, not a production predicate.
 func assertPrivateACL(t *testing.T, path string) {
 	t.Helper()
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,6 +73,10 @@ func assertPrivateACL(t *testing.T, path string) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatal(err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil || owner.String() != user.User.Sid.String() {
+		t.Fatal("owner is not the current user")
 	}
 	expected := map[string]bool{user.User.Sid.String(): false, "S-1-5-18": false}
 	for i := uint32(0); i < uint32(acl.AceCount); i++ {
@@ -93,14 +97,71 @@ func assertPrivateACL(t *testing.T, path string) {
 	}
 }
 
+func TestWindowsDescriptorRequiresCurrentOwner(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl := "D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")(A;OICI;FA;;;SY)"
+	for _, tc := range []struct {
+		name  string
+		owner string
+		want  bool
+	}{
+		{name: "current user", owner: "O:" + user.User.Sid.String(), want: true},
+		{name: "different owner", owner: "O:SY"},
+		{name: "unknown owner", owner: "O:S-1-5-21-111-222-333-1234"},
+		{name: "missing owner"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sd, err := windows.SecurityDescriptorFromString(tc.owner + dacl)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := descriptorPrivate(sd); got != tc.want {
+				t.Fatalf("descriptorPrivate with %s = %t, want %t", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWindowsPrivateDescriptorSetsCurrentOwner(t *testing.T) {
+	sd, err := privateDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil || owner.String() != user.User.Sid.String() {
+		t.Fatal("creation descriptor must explicitly set the current owner")
+	}
+}
+
 func TestWindowsProtectedPrivateACL(t *testing.T) {
 	dir := privateDir(t)
 	assertPrivateACL(t, dir)
+	temp := filepath.Join(dir, "exclusive-temp")
+	file, err := nativeOpen(temp, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer file.Close()
+	assertPrivateACL(t, temp)
 	path := filepath.Join(dir, "state")
 	if err := WriteAtomic(path, []byte("x")); err != nil {
 		t.Fatal(err)
 	}
 	assertPrivateACL(t, path)
+	lock := filepath.Join(dir, "lock")
+	release, err := Acquire(context.Background(), lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	assertPrivateACL(t, lock)
 	if err := EnsurePrivateDirectory(dir); err != nil {
 		t.Fatal("existing private dir rejected")
 	}
@@ -111,7 +172,7 @@ func TestWindowsDoesNotSecureUnrelatedDirectory(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "existing"), []byte("keep"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	sd, err := windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,9 +180,9 @@ func TestWindowsDoesNotSecureUnrelatedDirectory(t *testing.T) {
 	if err := EnsurePrivateDirectory(dir); err == nil {
 		t.Fatal("unprotected unrelated directory accepted")
 	}
-	sd, err = windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	sd, err = windows.GetNamedSecurityInfo(dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
 	if err != nil || sd.String() != before {
-		t.Fatal("unrelated DACL modified")
+		t.Fatal("unrelated owner or DACL modified")
 	}
 }
 

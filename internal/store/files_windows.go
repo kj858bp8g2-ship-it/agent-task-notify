@@ -32,7 +32,7 @@ func privateDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
 	if err != nil {
 		return nil, err
 	}
-	return windows.SecurityDescriptorFromString("D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")(A;OICI;FA;;;SY)")
+	return windows.SecurityDescriptorFromString("O:" + user.User.Sid.String() + "D:P(A;OICI;FA;;;" + user.User.Sid.String() + ")(A;OICI;FA;;;SY)")
 }
 
 func nativeMkdir(path string) error {
@@ -60,6 +60,9 @@ func nativeReparse(path string) bool {
 }
 
 func descriptorPrivate(sd *windows.SECURITY_DESCRIPTOR) bool {
+	if sd == nil {
+		return false
+	}
 	control, _, err := sd.Control()
 	if err != nil || control&windows.SE_DACL_PROTECTED == 0 {
 		return false
@@ -70,6 +73,10 @@ func descriptorPrivate(sd *windows.SECURITY_DESCRIPTOR) bool {
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
+		return false
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil || !owner.IsValid() || !owner.Equals(user.User.Sid) {
 		return false
 	}
 	foundUser, foundSystem := false, false
@@ -99,7 +106,7 @@ func nativePrivate(path string, directory bool) bool {
 	if err != nil || info.IsDir() != directory || (!directory && !info.Mode().IsRegular()) || nativeReparse(path) {
 		return false
 	}
-	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
 	return err == nil && descriptorPrivate(sd)
 }
 
@@ -123,7 +130,7 @@ func nativeOpen(path string, exclusive bool) (*os.File, error) {
 		return nil, err
 	}
 	var info windows.ByHandleFileInformation
-	actual, aclErr := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	actual, aclErr := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
 	if windows.GetFileInformationByHandle(h, &info) != nil || info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 || aclErr != nil || !descriptorPrivate(actual) {
 		windows.CloseHandle(h)
 		return nil, errPrivate
@@ -147,7 +154,7 @@ func nativeReplace(from, to string) error {
 	}
 	defer windows.CloseHandle(h)
 	var info windows.ByHandleFileInformation
-	sd, aclErr := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	sd, aclErr := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
 	if windows.GetFileInformationByHandle(h, &info) != nil || info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 || aclErr != nil || !descriptorPrivate(sd) {
 		return errPrivate
 	}

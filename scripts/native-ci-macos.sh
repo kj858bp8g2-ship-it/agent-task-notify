@@ -50,7 +50,16 @@ cleanup() {
     fi
     return "$cleanup_status"
 }
-trap cleanup EXIT
+cleanup_on_exit() {
+    local body_status=$?
+    local cleanup_status=0
+    cleanup || cleanup_status=$?
+    if test "$body_status" -ne 0; then
+        exit "$body_status"
+    fi
+    exit "$cleanup_status"
+}
+trap cleanup_on_exit EXIT
 
 # /usr/bin/security creates and locks only this test fixture; production code
 # uses the native Keychain API and never invokes this command.
@@ -59,7 +68,10 @@ trap cleanup EXIT
 "$security_bin" unlock-keychain -p atn-synthetic-ci-fixture-only "$test_keychain"
 "$security_bin" list-keychains -d user | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' > "$previous_search"
 "$security_bin" default-keychain -d user | sed -e 's/^[[:space:]]*"//' -e 's/"[[:space:]]*$//' > "$previous_default"
-test -s "$previous_search" && test -s "$previous_default"
+if ! test -s "$previous_search" || ! test -s "$previous_default"; then
+    echo "native macOS CI fixture requires nonempty Keychain backups" >&2
+    exit 1
+fi
 search_mutated=true
 default_mutated=true
 "$security_bin" list-keychains -d user -s "$test_keychain"
