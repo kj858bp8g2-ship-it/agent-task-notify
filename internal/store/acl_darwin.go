@@ -26,6 +26,11 @@ static int notify_acl_empty(acl_t acl) {
 // Query the property only after a successful extended stat instead: a missing
 // path, invalid fd, denied read, or unsupported operation must still fail closed.
 static int notify_filesec_empty(filesec_t security) {
+    // statx may return success after an ACL-buffer allocation failure without
+    // populating filesec. All mandatory stat properties must be available.
+    if (filesec_get_property(security, FILESEC_OWNER, NULL) != 0 ||
+        filesec_get_property(security, FILESEC_GROUP, NULL) != 0 ||
+        filesec_get_property(security, FILESEC_MODE, NULL) != 0) return 0;
     int present = 0;
     if (filesec_query_property(security, FILESEC_ACL, &present) != 0) return 0;
     if (!present) return 1;

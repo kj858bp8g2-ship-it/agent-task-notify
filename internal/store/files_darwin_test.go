@@ -2,6 +2,9 @@ package store
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,6 +12,95 @@ import (
 	"testing"
 	"time"
 )
+
+func TestDarwinRejectsIncompleteFileSecurity(t *testing.T) {
+	// Compile the production preamble itself: copying its predicate into a
+	// probe would leave this regression test independent of the actual gate.
+	parsed, err := parser.ParseFile(token.NewFileSet(), "acl_darwin.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatal("production ACL source unavailable")
+	}
+	var preamble string
+	for _, declaration := range parsed.Decls {
+		imports, ok := declaration.(*ast.GenDecl)
+		if !ok || imports.Tok != token.IMPORT || imports.Doc == nil {
+			continue
+		}
+		for _, spec := range imports.Specs {
+			if spec.(*ast.ImportSpec).Path.Value == `"C"` {
+				preamble = imports.Doc.Text()
+			}
+		}
+	}
+	if preamble == "" {
+		t.Fatal("production ACL preamble unavailable")
+	}
+	root := t.TempDir()
+	source := filepath.Join(root, "filesec.c")
+	if os.WriteFile(source, []byte(preamble+darwinIncompleteFileSecuritySource), 0600) != nil {
+		t.Fatal("filesec fixture source unavailable")
+	}
+	binary := filepath.Join(root, "filesec")
+	compileCtx, cancelCompile := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelCompile()
+	// The complete preamble also contains other private, unused entry points.
+	if exec.CommandContext(compileCtx, "/usr/bin/clang", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", source, "-o", binary).Run() != nil {
+		t.Fatal("stage=filesec-compile result=0")
+	}
+	runCtx, cancelRun := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelRun()
+	out, runErr := exec.CommandContext(runCtx, binary).Output()
+	if !regexp.MustCompile(`\A(?:stage=(?:unfilled|owner-only|group-only|mode-only|owner-group|owner-mode|group-mode|complete) result=[01]\n)+\z`).Match(out) {
+		t.Fatal("filesec output schema rejected")
+	}
+	t.Logf("%s", out)
+	if runErr != nil {
+		t.Fatal("stage=filesec-run result=0")
+	}
+	const want = "stage=unfilled result=0\n" +
+		"stage=owner-only result=0\n" +
+		"stage=group-only result=0\n" +
+		"stage=mode-only result=0\n" +
+		"stage=owner-group result=0\n" +
+		"stage=owner-mode result=0\n" +
+		"stage=group-mode result=0\n" +
+		"stage=complete result=1\n"
+	if string(out) != want {
+		t.Fatal("incomplete filesec accepted or complete no-ACL filesec rejected")
+	}
+}
+
+// Missing any mandatory stat property must fail closed, even though an absent
+// ACL property alone is valid after a fully populated successful statx call.
+const darwinIncompleteFileSecuritySource = `
+#include <stdio.h>
+#include <unistd.h>
+
+int main(void) {
+    const struct { const char *stage; unsigned fields; } cases[] = {
+        {"unfilled", 0}, {"owner-only", 1}, {"group-only", 2}, {"mode-only", 4},
+        {"owner-group", 3}, {"owner-mode", 5}, {"group-mode", 6}, {"complete", 7}
+    };
+    uid_t owner = geteuid();
+    gid_t group = getegid();
+    mode_t mode = S_IFREG | 0600;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        filesec_t security = filesec_init();
+        if (security == NULL) return 1;
+        unsigned fields = cases[i].fields;
+        if (((fields & 1) && filesec_set_property(security, FILESEC_OWNER, &owner) != 0) ||
+            ((fields & 2) && filesec_set_property(security, FILESEC_GROUP, &group) != 0) ||
+            ((fields & 4) && filesec_set_property(security, FILESEC_MODE, &mode) != 0)) {
+            filesec_free(security);
+            return 1;
+        }
+        int result = notify_filesec_empty(security);
+        filesec_free(security);
+        printf("stage=%s result=%d\n", cases[i].stage, result);
+    }
+    return 0;
+}
+`
 
 // This synthetic-only probe distinguishes directory checks from native ACL
 // retrieval, validation, and empty-entry semantics. No production hook is used.
