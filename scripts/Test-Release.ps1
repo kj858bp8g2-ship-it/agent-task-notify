@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $root = [IO.Path]::GetFullPath($PackageRoot)
 $allowed = @(
     '.codex-plugin/plugin.json','.github/ISSUE_TEMPLATE/bug_report.md','.github/workflows/test.yml','.gitignore',
-    'assets/agent-icons.json','config/defaults.json','docs/compatibility.md','docs/configuration.md','docs/privacy.md','docs/troubleshooting.md',
+    'assets/agent-icons.json','config/defaults.json','config/native-source-files.json','docs/compatibility.md','docs/configuration.md','docs/privacy.md','docs/superpowers/plans/2026-08-28-native-foundation.md','docs/superpowers/specs/2026-08-28-native-runtime-design.md','docs/troubleshooting.md',
     'hooks/hooks.json','integrations/opencode/agent-task-notify.mjs','integrations/opencode/bridge.mjs','integrations/workbuddy/.gitattributes','integrations/workbuddy/.workbuddy-plugin/plugin.json','integrations/workbuddy/Build-Plugin.ps1','integrations/workbuddy/hooks/hooks.json','integrations/workbuddy/hooks/launch.sh','integrations/workbuddy/README.md',
     'scripts/agent-task-notify.ps1','scripts/Configure-Notifications.ps1','scripts/Install-Notifications.ps1','scripts/Test-Release.ps1','scripts/Uninstall-Notifications.ps1',
     'skills/agent-task-notify/SKILL.md','skills/agent-task-notify/agents/openai.yaml',
@@ -14,6 +14,15 @@ $allowed = @(
     'tests/Test-Isolation.ps1','tests/Test-Diagnostics.ps1',
     'CHANGELOG.md','CONTRIBUTING.md','LICENSE','README.md','README.zh-CN.md','THIRD_PARTY_NOTICES.md'
 )
+$nativeManifest = Join-Path $root 'config/native-source-files.json'
+$nativeFiles = @(Get-Content -LiteralPath $nativeManifest -Raw | ConvertFrom-Json)
+foreach ($entry in $nativeFiles) {
+    if ($entry -isnot [string] -or [string]::IsNullOrWhiteSpace($entry) -or
+        $entry -match '(^/|\\|:|(^|/)\.\.?(/|$))' -or $entry -in $allowed) {
+        throw 'Invalid native release inventory entry.'
+    }
+    $allowed += $entry
+}
 $requiredRuntime = @('scripts/agent-task-notify.ps1','scripts/Configure-Notifications.ps1','scripts/Install-Notifications.ps1','scripts/Uninstall-Notifications.ps1','config/defaults.json','assets/agent-icons.json','src/Adapters.psm1','src/Installation.psm1','src/Providers.psm1','src/Runtime.psm1','src/Settings.psm1','src/Storage.psm1','integrations/opencode/agent-task-notify.mjs','integrations/opencode/bridge.mjs','integrations/workbuddy/Build-Plugin.ps1','integrations/workbuddy/hooks/hooks.json','integrations/workbuddy/hooks/launch.sh')
 $all = @([IO.Directory]::EnumerateFiles($root, '*', [IO.SearchOption]::AllDirectories) | Where-Object { $_ -notmatch '[\\/](\.git|\.superpowers)([\\/]|$)' } | ForEach-Object { [IO.Path]::GetRelativePath($root, $_).Replace('\','/') } | Sort-Object)
 foreach ($relative in $all) {

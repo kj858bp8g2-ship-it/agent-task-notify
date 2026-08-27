@@ -54,6 +54,21 @@ try {
     Copy-ATNReleasePackage $packageRoot $staging $safeFiles
     & (Join-Path $staging 'scripts/Test-Release.ps1') -PackageRoot $staging | Out-Null
 
+    $nativeManifest = Join-Path $staging 'config/native-source-files.json'
+    $originalNativeManifest = [IO.File]::ReadAllText($nativeManifest)
+    try {
+        [IO.File]::WriteAllText($nativeManifest, '["../unsafe.go"]', [Text.UTF8Encoding]::new($false))
+        Assert-ReleaseRejects { & (Join-Path $staging 'scripts/Test-Release.ps1') -PackageRoot $staging | Out-Null } 'Invalid native release inventory entry' 'release scanner rejects traversal in native inventory'
+    } finally {
+        [IO.File]::WriteAllText($nativeManifest, $originalNativeManifest, [Text.UTF8Encoding]::new($false))
+    }
+    try {
+        [IO.File]::WriteAllText($nativeManifest, '["go.mod","go.mod"]', [Text.UTF8Encoding]::new($false))
+        Assert-ReleaseRejects { & (Join-Path $staging 'scripts/Test-Release.ps1') -PackageRoot $staging | Out-Null } 'Invalid native release inventory entry' 'release scanner rejects duplicate native inventory entries'
+    } finally {
+        [IO.File]::WriteAllText($nativeManifest, $originalNativeManifest, [Text.UTF8Encoding]::new($false))
+    }
+
     $config = Join-Path $temp 'host/config.json'
     $data = Join-Path $temp 'isolated-data'
     & (Join-Path $staging 'scripts/Install-Notifications.ps1') -Agent claude-code -ConfigPath $config -DataDirectory $data | Out-Null

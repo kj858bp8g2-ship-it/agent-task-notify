@@ -1,0 +1,7 @@
+[
+  "go.mod",
+  "cmd/agent-task-notify/main.go",
+  "internal/cli/app.go",
+  "internal/cli/app_test.go",
+  "tests/native_cli_test.go"
+]

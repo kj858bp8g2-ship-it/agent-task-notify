@@ -4,6 +4,7 @@ agent_memory/
 node_modules/
 dist/
 coverage/
+bin/
 *.log
 *.dpapi
 *.tmp
