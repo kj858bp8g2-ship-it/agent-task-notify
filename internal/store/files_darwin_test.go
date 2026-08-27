@@ -10,6 +10,12 @@ import (
 
 func readForReplacement(path string) ([]byte, error) { return os.ReadFile(path) }
 
+func makeTargetNonPrivate(t *testing.T, path string) { t.Helper(); addDarwinFixtureACL(t, path, false) }
+func targetAccessSnapshot(t *testing.T, path string) string {
+	t.Helper()
+	return darwinACLListing(t, path)
+}
+
 func TestDarwinPrivateModes(t *testing.T) {
 	dir := privateDir(t)
 	path := filepath.Join(dir, "state")

@@ -10,6 +10,12 @@ import (
 
 var errPrivate = errors.New("private state unavailable")
 
+// Internal fixed labels support safe failure triage without retaining input or
+// native errors. The public text remains identical for every failure.
+type privateStateError struct{ stage, category string }
+
+func (*privateStateError) Error() string { return "private state unavailable" }
+
 // EnsurePrivateDirectory creates an owned directory with private access. Existing
 // directories are checked, never repaired or recursively chmodded/chowned.
 func EnsurePrivateDirectory(path string) error {
@@ -34,32 +40,35 @@ func EnsurePrivateDirectory(path string) error {
 // Sync is performed before replacement; this is not a power-loss guarantee.
 func WriteAtomic(path string, data []byte) error {
 	if !safeTarget(path) {
-		return errPrivate
+		return &privateStateError{"target-initial", "rejected"}
 	}
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
-		return errPrivate
+		return &privateStateError{"random", nativeErrorCategory(err)}
 	}
 	temp := filepath.Join(filepath.Dir(path), ".tmp-"+hex.EncodeToString(random[:]))
 	file, err := nativeOpen(temp, true)
 	if err != nil {
-		return errPrivate
+		return &privateStateError{"create", nativeErrorCategory(err)}
 	}
 	// Only the exclusive temporary name owned by this invocation is removed.
 	defer os.Remove(temp)
 	if _, err = file.Write(data); err != nil {
 		file.Close()
-		return errPrivate
+		return &privateStateError{"write", nativeErrorCategory(err)}
 	}
 	if err = file.Sync(); err != nil {
 		file.Close()
-		return errPrivate
+		return &privateStateError{"sync", nativeErrorCategory(err)}
 	}
 	if err = file.Close(); err != nil {
-		return errPrivate
+		return &privateStateError{"close", nativeErrorCategory(err)}
 	}
-	if !safeTarget(path) || nativeReplace(temp, path) != nil {
-		return errPrivate
+	if !safeTarget(path) {
+		return &privateStateError{"target-recheck", "rejected"}
+	}
+	if err = nativeReplace(temp, path); err != nil {
+		return &privateStateError{"replace", nativeErrorCategory(err)}
 	}
 	return nil
 }
@@ -69,7 +78,7 @@ func safeTarget(path string) bool {
 		return false
 	}
 	info, err := os.Lstat(path)
-	return os.IsNotExist(err) || (err == nil && info.Mode().IsRegular())
+	return os.IsNotExist(err) || (err == nil && info.Mode().IsRegular() && nativePrivate(path, false))
 }
 
 // Reject links/reparse points in every existing component, not just the leaf.

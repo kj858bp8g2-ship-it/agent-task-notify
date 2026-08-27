@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"golang.org/x/sys/windows"
 	"io"
 	"os"
@@ -24,6 +25,34 @@ func readForReplacement(path string) ([]byte, error) {
 	file := os.NewFile(uintptr(h), path)
 	defer file.Close()
 	return io.ReadAll(file)
+}
+
+func makeTargetNonPrivate(t *testing.T, path string) {
+	t.Helper()
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;" + user.User.Sid.String() + ")(A;;FA;;;SY)(A;;FR;;;WD)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, _, err := sd.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func targetAccessSnapshot(t *testing.T, path string) string {
+	t.Helper()
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sd.String()
 }
 
 // Independently inspect the kernel descriptor, not a production predicate.
@@ -180,6 +209,15 @@ func TestWindowsBlockedReplacementPreservesOriginal(t *testing.T) {
 	started := time.Now()
 	if err := WriteAtomic(path, []byte("replacement")); err == nil {
 		t.Fatal("non-delete-sharing reader did not block replacement")
+	} else {
+		var detail *privateStateError
+		if !errors.As(err, &detail) {
+			t.Fatal("missing replacement stage diagnostic")
+		}
+		if detail.stage != "replace" || (detail.category != "sharing" && detail.category != "access") {
+			t.Fatalf("wrong blocked replacement classification: %s/%s", detail.stage, detail.category)
+		}
+		logWriteFailure(t, err)
 	}
 	if time.Since(started) > 2*time.Second {
 		t.Fatal("replacement retry unbounded")
@@ -192,4 +230,66 @@ func TestWindowsBlockedReplacementPreservesOriginal(t *testing.T) {
 	if err != nil || len(entries) != 1 {
 		t.Fatal("failed replacement leaked temporary")
 	}
+}
+
+// A held delete-sharing handle isolates rename semantics from rapid reader
+// open/close timing. The old handle must retain old data while the name advances.
+func TestWindowsReplacementWithHeldDeleteSharingReader(t *testing.T) {
+	dir := privateDir(t)
+	path := filepath.Join(dir, "状态 空间😀")
+	if err := WriteAtomic(path, []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := windows.CreateFile(name, windows.GENERIC_READ, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := os.NewFile(uintptr(h), path)
+	defer reader.Close()
+	for i := 0; i < 3; i++ {
+		if err := WriteAtomic(path, []byte("replacement")); err != nil {
+			logWriteFailure(t, err)
+			t.Fatal("held delete-sharing reader prevented replacement")
+		}
+		assertPrivateACL(t, path)
+	}
+	old, err := io.ReadAll(reader)
+	if err != nil || string(old) != "original" {
+		t.Fatal("old handle did not retain old complete data")
+	}
+	current, err := readForReplacement(path)
+	if err != nil || string(current) != "replacement" {
+		t.Fatal("current name did not expose new complete data")
+	}
+}
+
+func TestWindowsReplacementDoesNotBypassReadOnly(t *testing.T) {
+	dir := privateDir(t)
+	path := filepath.Join(dir, "readonly")
+	if err := WriteAtomic(path, []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0400); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(path, 0600)
+	if err := WriteAtomic(path, []byte("replacement")); err == nil {
+		t.Fatal("read-only target replaced")
+	} else {
+		logWriteFailure(t, err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "original" {
+		t.Fatal("read-only contents changed")
+	}
+	name, _ := windows.UTF16PtrFromString(path)
+	attrs, err := windows.GetFileAttributes(name)
+	if err != nil || attrs&windows.FILE_ATTRIBUTE_READONLY == 0 {
+		t.Fatal("read-only attribute changed")
+	}
+	assertPrivateACL(t, path)
 }

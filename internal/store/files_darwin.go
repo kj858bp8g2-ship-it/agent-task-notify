@@ -1,10 +1,26 @@
 package store
 
 import (
+	"errors"
 	"os"
 
 	"golang.org/x/sys/unix"
 )
+
+func nativeErrorCategory(err error) string {
+	switch {
+	case errors.Is(err, unix.EACCES), errors.Is(err, unix.EPERM):
+		return "access"
+	case errors.Is(err, unix.ENOENT):
+		return "missing"
+	case errors.Is(err, unix.EEXIST):
+		return "exists"
+	case errors.Is(err, unix.EIO), errors.Is(err, unix.ENOSPC):
+		return "io"
+	default:
+		return "other"
+	}
+}
 
 func nativeMkdir(path string) error {
 	if err := os.Mkdir(path, 0700); err != nil {

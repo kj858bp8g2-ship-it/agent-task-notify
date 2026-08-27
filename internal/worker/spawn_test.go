@@ -181,15 +181,24 @@ func TestDetachedWorkerClosesHookPipes(t *testing.T) {
 			time.Sleep(10 * time.Millisecond)
 		}
 	})
-	eof := make(chan []byte, 2)
-	go func() { b, _ := io.ReadAll(stdout); eof <- b }()
-	go func() { b, _ := io.ReadAll(stderr); eof <- b }()
+	type pipeResult struct {
+		stream    string
+		data      []byte
+		completed time.Time
+		err       error
+	}
+	eof := make(chan pipeResult, 2)
+	go func() { b, err := io.ReadAll(stdout); eof <- pipeResult{"stdout", b, time.Now(), err} }()
+	go func() { b, err := io.ReadAll(stderr); eof <- pipeResult{"stderr", b, time.Now(), err} }()
 	var output []byte
 	for i := 0; i < 2; i++ {
 		select {
-		case b := <-eof:
-			t.Logf("pipe EOF after %s", time.Since(start))
-			output = append(output, b...)
+		case result := <-eof:
+			t.Logf("pipe %s read completed after %s; parent received after %s", result.stream, result.completed.Sub(start), time.Since(start))
+			if result.err != nil {
+				t.Fatal("hook pipe read failed")
+			}
+			output = append(output, result.data...)
 		case <-time.After(2 * time.Second):
 			hook.Process.Kill()
 			t.Fatal("hook pipes did not close within two seconds")

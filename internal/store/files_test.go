@@ -2,9 +2,12 @@ package store
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -60,6 +63,7 @@ func TestAtomicReplacement(t *testing.T) {
 			data = old
 		}
 		if err := WriteAtomic(path, data); err != nil {
+			logWriteFailure(t, err)
 			close(stop)
 			wg.Wait()
 			t.Fatal(err)
@@ -85,6 +89,35 @@ func TestAtomicReplacement(t *testing.T) {
 	entries, _ := os.ReadDir(dir)
 	if len(entries) != 1 {
 		t.Fatal("temporary file leaked")
+	}
+}
+
+func logWriteFailure(t *testing.T, err error) {
+	t.Helper()
+	var detail *privateStateError
+	if errors.As(err, &detail) {
+		t.Logf("atomic stage=%s category=%s", detail.stage, detail.category)
+	}
+}
+
+func TestAtomicDiagnosticDoesNotExposeInputs(t *testing.T) {
+	path := filepath.Join(privateDir(t), "input-must-not-escape", "state")
+	err := WriteAtomic(path, []byte("payload-must-not-escape"))
+	var detail *privateStateError
+	if !errors.As(err, &detail) {
+		t.Fatal("missing safe stage diagnostic")
+	}
+	if detail.stage != "target-initial" || detail.category != "rejected" {
+		t.Fatalf("wrong static classification: %s/%s", detail.stage, detail.category)
+	}
+	if err.Error() != "private state unavailable" || errors.Unwrap(err) != nil {
+		t.Fatal("public error contract changed")
+	}
+	for _, format := range []string{"%v", "%+v", "%#v"} {
+		text := fmt.Sprintf(format, err)
+		if strings.Contains(text, "input-must-not-escape") || strings.Contains(text, "payload-must-not-escape") {
+			t.Fatal("diagnostic leaked input")
+		}
 	}
 }
 
@@ -127,5 +160,32 @@ func TestPrivateFilesRejectUnsafeTargets(t *testing.T) {
 		if len(e.Name()) > 5 && e.Name()[:5] == ".tmp-" {
 			t.Fatal("failed write leaked temporary file")
 		}
+	}
+}
+
+func TestAtomicRejectsNonPrivateExistingTarget(t *testing.T) {
+	dir := privateDir(t)
+	path := filepath.Join(dir, "existing")
+	if err := WriteAtomic(path, []byte("original")); err != nil {
+		t.Fatal(err)
+	}
+	makeTargetNonPrivate(t, path)
+	before := targetAccessSnapshot(t, path)
+	if err := EnsurePrivateDirectory(dir); err != nil {
+		t.Fatal("fixture parent must remain private")
+	}
+	if err := WriteAtomic(path, []byte("replacement")); err == nil {
+		t.Error("non-private existing target accepted")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "original" {
+		t.Error("rejected target contents changed")
+	}
+	if after := targetAccessSnapshot(t, path); after != before {
+		t.Error("rejected target access rules changed")
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Error("rejected target left temporary file")
 	}
 }

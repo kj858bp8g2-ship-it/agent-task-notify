@@ -10,6 +10,23 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func nativeErrorCategory(err error) string {
+	switch {
+	case errors.Is(err, windows.ERROR_SHARING_VIOLATION), errors.Is(err, windows.ERROR_LOCK_VIOLATION):
+		return "sharing"
+	case errors.Is(err, windows.ERROR_ACCESS_DENIED):
+		return "access"
+	case errors.Is(err, windows.ERROR_FILE_NOT_FOUND), errors.Is(err, windows.ERROR_PATH_NOT_FOUND):
+		return "missing"
+	case errors.Is(err, windows.ERROR_FILE_EXISTS), errors.Is(err, windows.ERROR_ALREADY_EXISTS):
+		return "exists"
+	case errors.Is(err, windows.ERROR_DISK_FULL), errors.Is(err, windows.ERROR_WRITE_FAULT), errors.Is(err, windows.ERROR_READ_FAULT):
+		return "io"
+	default:
+		return "other"
+	}
+}
+
 func privateDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
@@ -119,14 +136,40 @@ func nativeReplace(from, to string) error {
 	if err != nil {
 		return err
 	}
-	target, err := windows.UTF16PtrFromString(to)
+	target, err := windows.UTF16FromString(to)
 	if err != nil {
 		return err
 	}
-	// Readers not opened with FILE_SHARE_DELETE can briefly block replacement.
-	// Retry only sharing/access conflicts, with a 200ms wait budget; never truncate.
+	// Open the already-synced temporary file without following a reparse point.
+	h, err := windows.CreateFile(source, windows.DELETE|windows.READ_CONTROL|windows.FILE_READ_ATTRIBUTES, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	if err != nil {
+		return err
+	}
+	defer windows.CloseHandle(h)
+	var info windows.ByHandleFileInformation
+	sd, aclErr := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if windows.GetFileInformationByHandle(h, &info) != nil || info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 || aclErr != nil || !descriptorPrivate(sd) {
+		return errPrivate
+	}
+	// Native pointer alignment supplies the correct HANDLE padding on each arch.
+	type renameInformation struct {
+		Flags          uint32
+		RootDirectory  windows.Handle
+		FileNameLength uint32
+		FileName       [1]uint16
+	}
+	var layout renameInformation
+	offset := unsafe.Offsetof(layout.FileName)
+	buffer := make([]byte, int(unsafe.Sizeof(layout))+len(target)*2)
+	header := (*renameInformation)(unsafe.Pointer(&buffer[0]))
+	header.Flags = windows.FILE_RENAME_REPLACE_IF_EXISTS | windows.FILE_RENAME_POSIX_SEMANTICS
+	header.FileNameLength = uint32((len(target) - 1) * 2)
+	copy(unsafe.Slice((*uint16)(unsafe.Pointer(&buffer[offset])), len(target)), target)
+	// POSIX replacement preserves old shared handles and advances the name.
+	// Unsupported APIs/filesystems fail closed; never fall back to MoveFileEx.
+	// Non-delete-sharing readers still block. Keep the same 200ms wait budget.
 	for attempt := 0; attempt < 21; attempt++ {
-		err = windows.MoveFileEx(source, target, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+		err = windows.SetFileInformationByHandle(h, windows.FileRenameInfoEx, &buffer[0], uint32(len(buffer)))
 		if err == nil {
 			return nil
 		}
