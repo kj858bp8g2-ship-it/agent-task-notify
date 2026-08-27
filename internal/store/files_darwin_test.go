@@ -52,7 +52,7 @@ func TestDarwinPrivateDirectoryNativeStages(t *testing.T) {
 	defer cancelRun()
 	out, runErr := exec.CommandContext(runCtx, binary, filepath.Join(root, "c-owned")).Output()
 	// Even test diagnostics may emit only the fixed stage/numeric schema.
-	if !regexp.MustCompile(`\A(?:stage=[a-z-]+ result=-?[0-9]+ errno=[0-9]+\n)+\z`).Match(out) {
+	if !regexp.MustCompile(`\A(?:stage=(?:mkdir|open|fstat|owner|type|init|set-fd|get-fd|valid-fd|entry-fd|get-link|valid-link|entry-link|chmod) result=-?[0-9]+ errno=[0-9]+\n)+\z`).Match(out) {
 		t.Fatal("probe output schema rejected")
 	}
 	t.Logf("%s", out)
@@ -105,8 +105,11 @@ int main(int argc, char **argv) {
     errno = 0;
     result = fstat(fd, &st); saved = errno;
     emit("fstat", result, saved);
-    int safe = result == 0 && st.st_uid == geteuid() && S_ISDIR(st.st_mode);
-    emit("owned-directory", safe, 0);
+    int owner = result == 0 && st.st_uid == geteuid();
+    int type = result == 0 && S_ISDIR(st.st_mode);
+    emit("owner", owner, 0);
+    emit("type", type, 0);
+    int safe = owner && type;
     if (!safe) { close(fd); return 1; }
     errno = 0;
     acl_t acl = acl_init(0); saved = errno;
