@@ -43,10 +43,12 @@ func TestNormalizeAllLegacyMappings(t *testing.T) {
 func TestNormalizeIgnoresUnsupportedAndChildren(t *testing.T) {
 	cases := []struct{ agent, raw string }{
 		{"codex", `{"hook_event_name":"Unknown","session_id":"s","turn_id":"r"}`}, {"codex", `{"hook_event_name":"Stop","session_id":"s"}`},
-		{"claude-code", `{"hook_event_name":"Stop","session_id":"s","agent_id":"child"}`}, {"cursor", `{"hook_event_name":"stop","conversation_id":"s","generation_id":"r","status":"unknown"}`},
-		{"gemini-cli", `{"hook_event_name":"AfterModel","session_id":"s"}`}, {"opencode", `{"schemaVersion":2,"event":"started","sessionId":"s","runId":"r"}`},
+		{"claude-code", `{"hook_event_name":"Stop"}`}, {"claude-code", `{"hook_event_name":"Stop","session_id":"s","agent_id":"child"}`},
+		{"cursor", `{"hook_event_name":"stop","conversation_id":"s","status":"completed"}`}, {"cursor", `{"hook_event_name":"stop","conversation_id":"s","generation_id":"r","status":"unknown"}`},
+		{"gemini-cli", `{"hook_event_name":"AfterAgent"}`}, {"gemini-cli", `{"hook_event_name":"AfterModel","session_id":"s"}`},
+		{"opencode", `{"schemaVersion":1,"event":"started","sessionId":"s"}`}, {"opencode", `{"schemaVersion":2,"event":"started","sessionId":"s","runId":"r"}`},
 		{"opencode", `{"schemaVersion":1.0,"event":"started","sessionId":"s","runId":"r"}`}, {"opencode", `{"schemaVersion":"1","event":"started","sessionId":"s","runId":"r"}`},
-		{"opencode", `{"schemaVersion":1,"event":"started","sessionId":"s","runId":"r","parentId":"parent"}`}, {"workbuddy", `{"hook_event_name":"SubagentStop","session_id":"s"}`},
+		{"opencode", `{"schemaVersion":1,"event":"started","sessionId":"s","runId":"r","parentId":"parent"}`}, {"workbuddy", `{"hook_event_name":"Stop"}`}, {"workbuddy", `{"hook_event_name":"SubagentStop","session_id":"s"}`},
 		{"codex", `{"hook_event_name":"Stop","session_id":"s","turn_id":"r","parent_session_id":null}`}, {"cursor", `{"hook_event_name":"stop","conversation_id":"s","generation_id":"r","status":"completed","parentSessionId":"p"}`},
 	}
 	for _, tc := range cases {
