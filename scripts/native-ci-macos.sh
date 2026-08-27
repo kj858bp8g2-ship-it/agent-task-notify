@@ -109,6 +109,6 @@ filesec_counterfactual() {
 }
 
 filesec_counterfactual
-go test -count=1 -v ./... | tee "$fixture_dir/go-test.log"
+go test -p 1 -count=1 -v ./... | tee "$fixture_dir/go-test.log"
 grep -F -- '--- PASS: TestDarwinLockedKeychainBackgroundDenial' "$fixture_dir/go-test.log"
 grep -F -- '--- PASS: TestDarwinRejectsIncompleteFileSecurity' "$fixture_dir/go-test.log"

@@ -95,7 +95,7 @@ func safePath(path string, missingLeaf bool) bool {
 			if !(leaf && missingLeaf && os.IsNotExist(err)) {
 				return false
 			}
-		} else if info.Mode()&os.ModeSymlink != 0 || nativeReparse(current) {
+		} else if info.Mode()&os.ModeSymlink != 0 || nativeReparse(current) || (!leaf && (!info.IsDir() || !nativeTrustedAncestor(current))) {
 			return false
 		}
 		if filepath.Dir(current) == current {

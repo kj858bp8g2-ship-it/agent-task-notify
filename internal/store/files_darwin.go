@@ -38,6 +38,10 @@ func nativeMkdir(path string) error {
 	return nil
 }
 func nativeReparse(path string) bool { return false } // lstat handles Darwin symlinks.
+func nativeTrustedAncestor(path string) bool {
+	var stat unix.Stat_t
+	return unix.Lstat(path, &stat) == nil && (stat.Uid == uint32(os.Geteuid()) || stat.Uid == 0)
+}
 func nativePrivate(path string, directory bool) bool {
 	var stat unix.Stat_t
 	if unix.Lstat(path, &stat) != nil || stat.Uid != uint32(os.Geteuid()) {
@@ -61,9 +65,16 @@ func nativeOpen(path string, exclusive bool) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
+	return finishNativeOpen(path, fd, created)
+}
+
+func finishNativeOpen(path string, fd int, created bool) (*os.File, error) {
 	var stat unix.Stat_t
 	if unix.Fstat(fd, &stat) != nil || stat.Uid != uint32(os.Geteuid()) || stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		unix.Close(fd)
+		if created {
+			os.Remove(path)
+		}
 		return nil, errPrivate
 	}
 	if created {

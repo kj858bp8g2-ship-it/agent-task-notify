@@ -110,6 +110,20 @@ func nativePrivate(path string, directory bool) bool {
 	return err == nil && descriptorPrivate(sd)
 }
 
+// System-owned ancestors are trusted, never accepted as private state leaves.
+func nativeTrustedAncestor(path string) bool {
+	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return false
+	}
+	owner, _, err := sd.Owner()
+	if err != nil || owner == nil || !owner.IsValid() {
+		return false
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	return err == nil && (owner.Equals(user.User.Sid) || owner.String() == "S-1-5-18" || owner.String() == "S-1-5-32-544")
+}
+
 func nativeOpen(path string, exclusive bool) (*os.File, error) {
 	sd, err := privateDescriptor()
 	if err != nil {
@@ -120,19 +134,26 @@ func nativeOpen(path string, exclusive bool) (*os.File, error) {
 		return nil, err
 	}
 	sa := windows.SecurityAttributes{Length: uint32(unsafe.Sizeof(windows.SecurityAttributes{})), SecurityDescriptor: sd}
-	disposition := uint32(windows.OPEN_ALWAYS)
-	if exclusive {
-		disposition = windows.CREATE_NEW
+	h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, &sa, windows.CREATE_NEW, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
+	created := err == nil
+	if !exclusive && (errors.Is(err, windows.ERROR_FILE_EXISTS) || errors.Is(err, windows.ERROR_ALREADY_EXISTS)) {
+		h, err = windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, nil, windows.OPEN_EXISTING, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	}
-	h, err := windows.CreateFile(name, windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL, windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE, &sa, disposition, windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT, 0)
 	runtime.KeepAlive(sd)
 	if err != nil {
 		return nil, err
 	}
+	return finishNativeOpen(path, h, created)
+}
+
+func finishNativeOpen(path string, h windows.Handle, created bool) (*os.File, error) {
 	var info windows.ByHandleFileInformation
 	actual, aclErr := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.OWNER_SECURITY_INFORMATION)
 	if windows.GetFileInformationByHandle(h, &info) != nil || info.FileAttributes&(windows.FILE_ATTRIBUTE_REPARSE_POINT|windows.FILE_ATTRIBUTE_DIRECTORY) != 0 || aclErr != nil || !descriptorPrivate(actual) {
 		windows.CloseHandle(h)
+		if created {
+			os.Remove(path)
+		}
 		return nil, errPrivate
 	}
 	return os.NewFile(uintptr(h), path), nil

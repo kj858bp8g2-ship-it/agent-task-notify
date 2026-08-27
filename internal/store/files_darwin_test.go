@@ -11,7 +11,32 @@ import (
 	"regexp"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
+
+func TestDarwinFinishOpenCleansOnlyNewName(t *testing.T) {
+	for _, created := range []bool{true, false} {
+		path := filepath.Join(privateDir(t), "owned-name")
+		fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_CLOEXEC, 0600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := unix.Close(fd); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := finishNativeOpen(path, fd, created); err == nil {
+			t.Fatal("closed handle accepted")
+		}
+		_, err = os.Lstat(path)
+		if created && !os.IsNotExist(err) {
+			t.Fatal("new empty name leaked after initial validation failure")
+		}
+		if !created && err != nil {
+			t.Fatal("existing lock name removed")
+		}
+	}
+}
 
 func TestDarwinRejectsIncompleteFileSecurity(t *testing.T) {
 	// Compile the production preamble itself: copying its predicate into a

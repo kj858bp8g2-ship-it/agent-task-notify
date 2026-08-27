@@ -27,6 +27,30 @@ func readForReplacement(path string) ([]byte, error) {
 	return io.ReadAll(file)
 }
 
+func TestWindowsFinishOpenCleansOnlyNewName(t *testing.T) {
+	for _, created := range []bool{true, false} {
+		path := filepath.Join(privateDir(t), "owned-name")
+		file, err := nativeOpen(path, true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle := windows.Handle(file.Fd())
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := finishNativeOpen(path, handle, created); err == nil {
+			t.Fatal("closed handle accepted")
+		}
+		_, err = os.Lstat(path)
+		if created && !os.IsNotExist(err) {
+			t.Fatal("new empty name leaked after initial validation failure")
+		}
+		if !created && err != nil {
+			t.Fatal("existing lock name removed")
+		}
+	}
+}
+
 func makeTargetNonPrivate(t *testing.T, path string) {
 	t.Helper()
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()

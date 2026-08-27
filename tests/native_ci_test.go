@@ -476,7 +476,7 @@ func TestNativeCIScriptFilesecCounterfactualEvidence(t *testing.T) {
 			goCalls, err := os.ReadFile(goLog)
 			wantCalls := "test -count=1 -v -timeout=45s -run ^TestDarwinRejectsIncompleteFileSecurity$ ./internal/store\n"
 			if scenario.wantCode == 0 {
-				wantCalls += "test -count=1 -v ./...\n"
+				wantCalls += "test -p 1 -count=1 -v ./...\n"
 			}
 			if err != nil || string(goCalls) != wantCalls {
 				t.Fatalf("unexpected fake go invocations: got=%q want=%q err=%v", goCalls, wantCalls, err)
