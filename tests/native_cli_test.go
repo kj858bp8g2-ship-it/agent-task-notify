@@ -15,7 +15,6 @@ import (
 
 func TestNativeCLIWithoutLanguageRuntime(t *testing.T) {
 	moduleRoot := filepath.Dir(mustGetwd(t))
-	before := configurationFiles(t, moduleRoot)
 	temp := t.TempDir()
 	binaryName := "通知 工具"
 	if runtime.GOOS == "windows" {
@@ -33,11 +32,19 @@ func TestNativeCLIWithoutLanguageRuntime(t *testing.T) {
 	if err := os.Mkdir(emptyPath, 0o700); err != nil {
 		t.Fatalf("create empty PATH directory: %v", err)
 	}
+	runtimeRoot := filepath.Join(temp, "synthetic-runtime")
+	workingDirectory := filepath.Join(runtimeRoot, "working-directory")
+	if err := os.MkdirAll(workingDirectory, 0o700); err != nil {
+		t.Fatalf("create synthetic runtime directory: %v", err)
+	}
+	before := runtimeEntries(t, runtimeRoot)
+	commandEnvironment := nativeCommandEnvironment(emptyPath, runtimeRoot)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	run := exec.CommandContext(ctx, binaryPath, "version")
-	run.Env = append(withoutPath(os.Environ()), "PATH="+emptyPath)
+	run.Dir = workingDirectory
+	run.Env = commandEnvironment
 	var versionStderr bytes.Buffer
 	run.Stderr = &versionStderr
 	output, err := run.Output()
@@ -50,9 +57,13 @@ func TestNativeCLIWithoutLanguageRuntime(t *testing.T) {
 	if got := versionStderr.String(); got != "" {
 		t.Fatalf("version stderr = %q, want empty", got)
 	}
+	if after := runtimeEntries(t, runtimeRoot); !slices.Equal(before, after) {
+		t.Fatalf("version command changed synthetic runtime entries: before %q, after %q", before, after)
+	}
 
 	unknown := exec.CommandContext(ctx, binaryPath, "synthetic-sensitive-value")
-	unknown.Env = append(withoutPath(os.Environ()), "PATH="+emptyPath)
+	unknown.Dir = workingDirectory
+	unknown.Env = commandEnvironment
 	var unknownStderr bytes.Buffer
 	unknown.Stderr = &unknownStderr
 	unknownOutput, unknownErr := unknown.Output()
@@ -65,17 +76,32 @@ func TestNativeCLIWithoutLanguageRuntime(t *testing.T) {
 	if got, want := unknownStderr.String(), "usage: agent-task-notify version\n"; got != want {
 		t.Fatalf("unknown command stderr = %q, want %q", got, want)
 	}
-
-	if after := configurationFiles(t, moduleRoot); !slices.Equal(before, after) {
-		t.Fatalf("native command changed configuration files: before %q, after %q", before, after)
+	if after := runtimeEntries(t, runtimeRoot); !slices.Equal(before, after) {
+		t.Fatalf("unknown command changed synthetic runtime entries: before %q, after %q", before, after)
 	}
 }
 
 func withoutPath(environment []string) []string {
+	return withoutEnvironmentNames(environment, "PATH")
+}
+
+func nativeCommandEnvironment(emptyPath, runtimeRoot string) []string {
+	environment := withoutEnvironmentNames(withoutPath(os.Environ()), "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ATN_DATA_DIRECTORY")
+	return append(environment,
+		"PATH="+emptyPath,
+		"HOME="+filepath.Join(runtimeRoot, "home"),
+		"USERPROFILE="+filepath.Join(runtimeRoot, "user-profile"),
+		"APPDATA="+filepath.Join(runtimeRoot, "app-data"),
+		"LOCALAPPDATA="+filepath.Join(runtimeRoot, "local-app-data"),
+		"ATN_DATA_DIRECTORY="+filepath.Join(runtimeRoot, "atn-data"),
+	)
+}
+
+func withoutEnvironmentNames(environment []string, names ...string) []string {
 	filtered := make([]string, 0, len(environment))
 	for _, entry := range environment {
 		name, _, found := strings.Cut(entry, "=")
-		if found && strings.EqualFold(name, "PATH") {
+		if found && containsFold(names, name) {
 			continue
 		}
 		filtered = append(filtered, entry)
@@ -83,23 +109,36 @@ func withoutPath(environment []string) []string {
 	return filtered
 }
 
-func configurationFiles(t *testing.T, moduleRoot string) []string {
+func containsFold(names []string, name string) bool {
+	for _, candidate := range names {
+		if strings.EqualFold(candidate, name) {
+			return true
+		}
+	}
+	return false
+}
+
+func runtimeEntries(t *testing.T, runtimeRoot string) []string {
 	t.Helper()
-	var files []string
-	configRoot := filepath.Join(moduleRoot, "config")
-	if err := filepath.WalkDir(configRoot, func(path string, entry os.DirEntry, err error) error {
+	var entries []string
+	if err := filepath.WalkDir(runtimeRoot, func(path string, entry os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if !entry.IsDir() {
-			files = append(files, path)
+		relative, err := filepath.Rel(runtimeRoot, path)
+		if err != nil {
+			return err
 		}
+		if entry.IsDir() {
+			relative += "/"
+		}
+		entries = append(entries, relative)
 		return nil
 	}); err != nil {
-		t.Fatalf("list configuration files: %v", err)
+		t.Fatalf("list synthetic runtime entries: %v", err)
 	}
-	slices.Sort(files)
-	return files
+	slices.Sort(entries)
+	return entries
 }
 
 func mustGetwd(t *testing.T) string {

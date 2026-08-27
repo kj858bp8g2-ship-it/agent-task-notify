@@ -30,7 +30,7 @@ func TestVersionAndUnknownArguments(t *testing.T) {
 		},
 		{
 			name:     "unknown argument",
-			args:     []string{"unknown"},
+			args:     []string{"synthetic-sensitive-value"},
 			wantCode: 2,
 			wantOut:  "",
 			wantErr:  "usage: agent-task-notify version\n",
