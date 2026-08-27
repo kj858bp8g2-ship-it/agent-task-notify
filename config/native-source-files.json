@@ -1,7 +1,16 @@
 [
   "go.mod",
+  "go.sum",
   "cmd/agent-task-notify/main.go",
   "internal/cli/app.go",
   "internal/cli/app_test.go",
-  "tests/native_cli_test.go"
+  "tests/native_cli_test.go",
+  "internal/secrets/vault.go",
+  "internal/secrets/envelope.go",
+  "internal/secrets/native_windows.go",
+  "internal/secrets/native_darwin.go",
+  "internal/secrets/interaction_darwin.go",
+  "internal/secrets/vault_test.go",
+  "internal/secrets/native_windows_test.go",
+  "internal/secrets/native_darwin_test.go"
 ]
