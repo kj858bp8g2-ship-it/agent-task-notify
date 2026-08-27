@@ -27,7 +27,7 @@
 | 1 | Auditable Go scaffold, safe version command, exact source manifest | `go.mod`, `go.sum`, `cmd/agent-task-notify/main.go`, `internal/cli/app.go`, `internal/cli/app_test.go`, `tests/native_cli_test.go`, `config/native-source-files.json`, `scripts/Test-Release.ps1`, `.gitignore` |
 | 2 | Native credential protection and non-interactive Keychain access | `internal/secrets/vault.go`, `envelope.go`, `native_windows.go`, `native_darwin.go`, `interaction_darwin.go`, `vault_test.go`, `native_windows_test.go`, `native_darwin_test.go`; `THIRD_PARTY_NOTICES.md`, dependency files and source manifest |
 | 3 | Private atomic files, cross-process locks, detached workers, bounded schedule | `internal/store/files.go`, `files_windows.go`, `files_darwin.go`, `acl_darwin.go`, `lock.go`, `lock_windows.go`, `lock_darwin.go`, `files_test.go`, `files_windows_test.go`, `files_darwin_test.go`, `lock_test.go`; `internal/worker/spawn.go`, `spawn_windows.go`, `spawn_darwin.go`, `delivery.go`, `spawn_test.go`, `delivery_test.go`; source manifest |
-| 4 | Platform CI and explicit gate evidence, not public stable release | `.github/workflows/native.yml`, `scripts/native-ci-macos.sh`, `tests/native_ci_test.go`, `docs/native-validation.md`; source manifest |
+| 4 | Platform CI and explicit gate evidence, not public stable release | `.github/workflows/native.yml`, `scripts/native-ci-macos.sh`, `tests/native_ci_test.go`, `tests/runtime-process.test.cjs` (bounded failure diagnostics only), `docs/native-validation.md`; source manifest |
 
 Package paths below are relative to the repository; filenames within a package in this map remain in that package. No additional commands, GUI, service, telemetry, providers, adapters, or installation behavior belong to this foundation phase. If a listed file needs a responsibility split, ask the controller for a recorded plan amendment before creating extra files.
 
@@ -229,7 +229,7 @@ Implement a single fixed retry-delay slice and a single extension branch after a
 
 ### Task 4: Real platform CI gates and candidate evidence
 
-**Files:** Create `.github/workflows/native.yml`, `scripts/native-ci-macos.sh`, `docs/native-validation.md`, `tests/native_ci_test.go`; extend native manifest. The focused CI regression file covers refusal before Keychain commands, partial-configuration cleanup through an isolated fake command boundary, and matrix-unique artifact names. It must never execute a real Keychain command locally.
+**Files:** Create `.github/workflows/native.yml`, `scripts/native-ci-macos.sh`, `docs/native-validation.md`, `tests/native_ci_test.go`; extend native manifest. The focused CI regression file covers refusal before Keychain commands, partial-configuration cleanup through an isolated fake command boundary, and matrix-unique artifact names. It must never execute a real Keychain command locally. Following a real legacy retry-cap CI timeout, `tests/runtime-process.test.cjs` may add bounded fixed-schema failure diagnostics and a redaction regression only; its existing time budgets, production code, and success assertions remain unchanged.
 
 **Interfaces:** Consume `go test ./...`, `go vet ./...`, the version command and platform tests. No release publication or auto-install entry point in this task. CI is read-only except its ephemeral checkout/test fixtures and workflow artifacts.
 
