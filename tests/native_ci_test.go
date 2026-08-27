@@ -1,36 +1,33 @@
 package tests
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNativeCIScriptRefusesBeforeSecurityCommand(t *testing.T) {
 	runnerTemp := t.TempDir()
 	log := filepath.Join(t.TempDir(), "security.log")
 	fake := writeFakeSecurity(t)
-	code, output := runNativeCIScript(t, map[string]string{
+	code, output := runNativeCIScript(t, guardScriptForTest(t), map[string]string{
 		"RUNNER_TEMP":            runnerTemp,
 		"ATN_TEST_FAKE_SECURITY": "1",
 		"ATN_TEST_SECURITY_BIN":  filepath.ToSlash(fake),
 		"ATN_FAKE_SECURITY_LOG":  filepath.ToSlash(log),
 	})
-	if code != 2 || !strings.Contains(output, "requires CI=true") {
-		t.Fatalf("unexpected refusal: code=%d output=%q", code, output)
-	}
-	if _, err := os.Stat(log); !os.IsNotExist(err) {
-		t.Fatalf("refusal invoked fake security: %v", err)
-	}
+	assertNonCIRefusal(t, code, output, log)
 }
 
 func TestNativeCIScriptRestoresAfterPartialConfigurationFailure(t *testing.T) {
 	runnerTemp := t.TempDir()
 	log := filepath.Join(t.TempDir(), "security.log")
 	fake := writeFakeSecurity(t)
-	code, output := runNativeCIScript(t, map[string]string{
+	code, output := runNativeCIScript(t, productionNativeCIScript(t), map[string]string{
 		"CI":                     "true",
 		"RUNNER_TEMP":            runnerTemp,
 		"ATN_TEST_FAKE_SECURITY": "1",
@@ -75,19 +72,67 @@ func TestNativeWorkflowArtifactNameIncludesMatrixLabelAndRunnerIdentity(t *testi
 	}
 }
 
-func runNativeCIScript(t *testing.T, extra map[string]string) (int, string) {
+func guardScriptForTest(t *testing.T) string {
+	t.Helper()
+	script := productionNativeCIScript(t)
+	if os.Getenv("ATN_GUARD_COUNTERFACTUAL") != "1" {
+		return script
+	}
+	contents, err := os.ReadFile(script)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const guard = `if test "${CI:-}" != "true" || test -z "${RUNNER_TEMP:-}"; then
+    echo "native macOS CI fixture requires CI=true and RUNNER_TEMP" >&2
+    exit 2
+fi
+
+`
+	modified := strings.Replace(string(contents), guard, "", 1)
+	if modified == string(contents) {
+		t.Fatal("counterfactual did not remove the production guard")
+	}
+	copyPath := filepath.Join(t.TempDir(), "native-ci-macos-without-guard.sh")
+	if err := os.WriteFile(copyPath, []byte(modified), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return copyPath
+}
+
+func productionNativeCIScript(t *testing.T) string {
+	t.Helper()
+	return filepath.Join("..", "scripts", "native-ci-macos.sh")
+}
+
+func assertNonCIRefusal(t *testing.T, code int, output, log string) {
+	t.Helper()
+	_, err := os.Stat(log)
+	logExists := err == nil
+	if code != 2 || !strings.Contains(output, "requires CI=true") || logExists {
+		t.Fatalf("expected non-CI refusal before security invocation: code=%d output=%q fakeSecurityInvoked=%t", code, output, logExists)
+	}
+	if !os.IsNotExist(err) {
+		t.Fatalf("unexpected fake security log state: %v", err)
+	}
+}
+
+func runNativeCIScript(t *testing.T, script string, extra map[string]string) (int, string) {
 	t.Helper()
 	bash, err := exec.LookPath("bash")
 	if err != nil {
 		t.Fatal("bash is required for native CI script regression tests")
 	}
-	script := filepath.Join("..", "scripts", "native-ci-macos.sh")
-	cmd := exec.Command(bash, script)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bash, script)
 	cmd.Env = withoutNativeCIEnvironment(os.Environ())
 	for key, value := range extra {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 	output, err := cmd.CombinedOutput()
+	if ctx.Err() != nil {
+		t.Fatalf("native CI script exceeded bounded test timeout: %v", ctx.Err())
+	}
 	if err == nil {
 		return 0, string(output)
 	}
