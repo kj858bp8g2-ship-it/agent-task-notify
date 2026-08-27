@@ -1,0 +1,6 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "bash \"${CODEBUDDY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/launch.sh\"" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "bash \"${CODEBUDDY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/launch.sh\"" }] }]
+  }
+}
