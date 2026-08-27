@@ -246,7 +246,7 @@ jobs:
     timeout-minutes: 20
 ```
 
-- [ ] On Mac, invoke a checked-in script that first requires `CI=true` and nonempty `RUNNER_TEMP`, creates a unique directory there, creates a dedicated Keychain with a synthetic password, and sets only the ephemeral runner's keychain search/default configuration for this job. Export `ATN_TEST_KEYCHAIN` to the test command. Install an EXIT trap to unlock and delete only that exact generated fixture; never accept an arbitrary deletion target or use a real user's keychain. Do not put any phone credential in CI. Run the suite including the locked-Keychain gate under this fixture. Explain test-only use of `/usr/bin/security`; the built notifier does not execute it.
+- [ ] On Mac, invoke a checked-in script that first requires `CI=true` and nonempty `RUNNER_TEMP`, creates a unique directory there, creates a dedicated Keychain with a synthetic password, and sets only the ephemeral runner's keychain search/default configuration for this job. Export `ATN_TEST_KEYCHAIN` to the test command. The exact fixture is `RUNNER_TEMP/atn-keychain.<random>/synthetic.keychain-db`; its public test-only password is `atn-synthetic-ci-fixture-only`, matching the Task 2 locked-Keychain test. Install an EXIT trap to unlock and delete only that exact generated fixture; never accept an arbitrary deletion target or use a real user's keychain. Do not put any phone credential in CI. Run the suite including the locked-Keychain gate under this fixture. Explain test-only use of `/usr/bin/security`; the built notifier does not execute it.
 
 ```sh
 test "${CI:-}" = true && test -n "${RUNNER_TEMP:-}" || exit 2
