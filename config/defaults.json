@@ -1,0 +1,14 @@
+{
+  "provider": "bark",
+  "minSeconds": 1800,
+  "longTaskSeconds": 3600,
+  "mediumRingSeconds": 45,
+  "longRingSeconds": 60,
+  "continuous": true,
+  "level": "critical",
+  "volume": 7,
+  "sound": "alarm",
+  "ntfyPriority": 4,
+  "enableAttention": false,
+  "icons": {}
+}
