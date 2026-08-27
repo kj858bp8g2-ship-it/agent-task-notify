@@ -117,41 +117,70 @@ func TestNativeCIScriptCleanupObserverTransform(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	withoutSetup := strings.Replace(string(contents), nativeCIShellSetup, "", 1)
-	tests := []struct {
-		name     string
-		contents []byte
-		wantErr  bool
-	}{
-		{name: "LF", contents: contents},
-		{name: "CRLF", contents: []byte(strings.ReplaceAll(string(contents), "\n", "\r\n"))},
-		{name: "missing setup", contents: []byte(withoutSetup), wantErr: true},
-		{name: "repeated setup", contents: []byte(nativeCIShellSetup + string(contents)), wantErr: true},
+	for _, fixture := range nativeCICleanupObserverFixtures(contents) {
+		t.Run(fixture.name, func(t *testing.T) {
+			tests := []struct {
+				name     string
+				contents []byte
+				wantErr  bool
+			}{
+				{name: "LF", contents: fixture.lf},
+				{name: "CRLF", contents: fixture.crlf},
+				{name: "missing setup", contents: fixture.missingSetup, wantErr: true},
+				{name: "repeated setup", contents: fixture.repeatedSetup, wantErr: true},
+			}
+			var lfTransformed string
+			for _, test := range tests {
+				t.Run(test.name, func(t *testing.T) {
+					transformed, err := nativeCIScriptWithCleanupObserverContents(test.contents)
+					if test.wantErr {
+						if err == nil || err.Error() != nativeCICleanupObserverSetupError {
+							t.Fatalf("unexpected transform error: %v", err)
+						}
+						return
+					}
+					if err != nil {
+						t.Fatal(err)
+					}
+					got := string(transformed)
+					if strings.Count(got, nativeCIShellSetup) != 1 || strings.Count(got, "rm() {") != 1 {
+						t.Fatalf("cleanup observer was not injected exactly once: %q", got)
+					}
+					if !strings.Contains(got, "cleanup_on_exit() {") || !strings.Contains(got, "filesec_counterfactual\n") {
+						t.Fatal("cleanup wrapper or production test body was not retained")
+					}
+					if test.name == "LF" {
+						lfTransformed = got
+					} else if got != lfTransformed {
+						t.Fatal("LF and CRLF production templates transformed differently")
+					}
+				})
+			}
+		})
 	}
-	var lfTransformed string
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			transformed, err := nativeCIScriptWithCleanupObserverContents(test.contents)
-			if test.wantErr {
-				if err == nil || err.Error() != nativeCICleanupObserverSetupError {
-					t.Fatalf("unexpected transform error: %v", err)
-				}
-				return
+}
+
+func TestNativeCIScriptCleanupObserverFixtures(t *testing.T) {
+	contents, err := os.ReadFile(productionNativeCIScript(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, fixture := range nativeCICleanupObserverFixtures(contents) {
+		t.Run(fixture.name, func(t *testing.T) {
+			if fixture.name == "LF source" && strings.Contains(string(fixture.source), "\r") {
+				t.Fatalf("LF source was not canonical: %q", fixture.source)
 			}
-			if err != nil {
-				t.Fatal(err)
+			if fixture.name == "CRLF source" && (!strings.Contains(string(fixture.source), "\r\n") || strings.Contains(string(fixture.source), "\r\r\n")) {
+				t.Fatalf("CRLF source was malformed: %q", fixture.source)
 			}
-			got := string(transformed)
-			if strings.Count(got, nativeCIShellSetup) != 1 || strings.Count(got, "rm() {") != 1 {
-				t.Fatalf("cleanup observer was not injected exactly once: %q", got)
+			if strings.Contains(string(fixture.lf), "\r") {
+				t.Fatalf("LF fixture contains a carriage return: %q", fixture.lf)
 			}
-			if !strings.Contains(got, "cleanup_on_exit() {") || !strings.Contains(got, "filesec_counterfactual\n") {
-				t.Fatal("cleanup wrapper or production test body was not retained")
+			if strings.Contains(string(fixture.crlf), "\r\r\n") || strings.ReplaceAll(string(fixture.crlf), "\r\n", "\n") != string(fixture.lf) {
+				t.Fatalf("CRLF fixture is malformed or differs after normalization: %q", fixture.crlf)
 			}
-			if test.name == "LF" {
-				lfTransformed = got
-			} else if got != lfTransformed {
-				t.Fatal("LF and CRLF production templates transformed differently")
+			if strings.Count(string(fixture.missingSetup), nativeCIShellSetup) != 0 || strings.Count(string(fixture.repeatedSetup), nativeCIShellSetup) != 2 {
+				t.Fatalf("setup marker variants are not exact: missing=%q repeated=%q", fixture.missingSetup, fixture.repeatedSetup)
 			}
 		})
 	}
@@ -162,7 +191,11 @@ func TestNativeCIScriptCleanupObserverRunsCRLFScript(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	script := nativeCIScriptWithCleanupObserverFromContents(t, []byte(strings.ReplaceAll(string(contents), "\n", "\r\n")))
+	fixtures := nativeCICleanupObserverFixtures(contents)
+	if len(fixtures) != 2 || fixtures[1].name != "CRLF source" {
+		t.Fatalf("missing CRLF source fixture: %q", fixtures)
+	}
+	script := nativeCIScriptWithCleanupObserverFromContents(t, fixtures[1].crlf)
 	runnerTemp, log, env := nativeCIFakeFixture(t)
 	env["ATN_FAKE_SECURITY_FAIL_DEFAULT"] = "1"
 	code, output := runNativeCIScript(t, script, env)
@@ -170,6 +203,35 @@ func TestNativeCIScriptCleanupObserverRunsCRLFScript(t *testing.T) {
 		t.Fatalf("CRLF cleanup-observer copy hid body failure 73: code=%d output=%s", code, output)
 	}
 	assertNativeCICleanup(t, runnerTemp, log, true, "")
+}
+
+type nativeCICleanupObserverFixture struct {
+	name          string
+	source        []byte
+	lf            []byte
+	crlf          []byte
+	missingSetup  []byte
+	repeatedSetup []byte
+}
+
+func nativeCICleanupObserverFixtures(contents []byte) []nativeCICleanupObserverFixture {
+	template := strings.ReplaceAll(string(contents), "\r\n", "\n")
+	return []nativeCICleanupObserverFixture{
+		nativeCICleanupObserverFixtureFromSource("LF source", template),
+		nativeCICleanupObserverFixtureFromSource("CRLF source", strings.ReplaceAll(template, "\n", "\r\n")),
+	}
+}
+
+func nativeCICleanupObserverFixtureFromSource(name, source string) nativeCICleanupObserverFixture {
+	template := strings.ReplaceAll(source, "\r\n", "\n")
+	return nativeCICleanupObserverFixture{
+		name:          name,
+		source:        []byte(source),
+		lf:            []byte(template),
+		crlf:          []byte(strings.ReplaceAll(template, "\n", "\r\n")),
+		missingSetup:  []byte(strings.Replace(template, nativeCIShellSetup, "", 1)),
+		repeatedSetup: []byte(strings.Replace(template, nativeCIShellSetup, nativeCIShellSetup+nativeCIShellSetup, 1)),
+	}
 }
 
 func nativeCIFakeFixture(t *testing.T) (string, string, map[string]string) {
