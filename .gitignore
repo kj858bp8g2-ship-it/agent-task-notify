@@ -1,0 +1,12 @@
+.superpowers/
+.worktrees/
+agent_memory/
+node_modules/
+dist/
+coverage/
+*.log
+*.dpapi
+*.tmp
+settings.local.json
+.env
+.env.*
