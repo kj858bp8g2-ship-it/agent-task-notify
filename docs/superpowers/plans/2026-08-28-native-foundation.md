@@ -98,7 +98,7 @@ The source scanner currently rejects the newly tracked design file before any ru
 
 ### Task 2: Native protected envelopes and non-interactive access
 
-**Files:** Create the eight `internal/secrets` files in the map; modify `go.mod`, add `go.sum`, extend `config/native-source-files.json`, update `THIRD_PARTY_NOTICES.md`.
+**Files:** Create `internal/secrets/vault.go`, `internal/secrets/envelope.go`, `internal/secrets/native_windows.go`, `internal/secrets/native_darwin.go`, `internal/secrets/interaction_darwin.go`, `internal/secrets/vault_test.go`, `internal/secrets/native_windows_test.go`, and `internal/secrets/native_darwin_test.go`; modify `go.mod`, add `go.sum`, extend `config/native-source-files.json`, update `THIRD_PARTY_NOTICES.md`.
 
 **Interfaces:**
 
@@ -163,7 +163,7 @@ Use a narrow Darwin cgo bridge around `SecKeychainGetUserInteractionAllowed`/`Se
 
 ### Task 3: Private state primitives and detached bounded delivery
 
-**Files:** Create the 14 `internal/store` and `internal/worker` files in the map; extend the native source manifest. No CLI worker command or installed hook is enabled in this task; tests use a helper branch of the compiled test executable to exercise the real spawning primitive.
+**Files:** Create `internal/store/files.go`, `internal/store/files_windows.go`, `internal/store/files_darwin.go`, `internal/store/lock.go`, `internal/store/lock_windows.go`, `internal/store/lock_darwin.go`, `internal/store/files_test.go`, `internal/store/lock_test.go`, `internal/worker/spawn.go`, `internal/worker/spawn_windows.go`, `internal/worker/spawn_darwin.go`, `internal/worker/delivery.go`, `internal/worker/spawn_test.go`, and `internal/worker/delivery_test.go`; extend the native source manifest. No CLI worker command or installed hook is enabled in this task; tests use a helper branch of the compiled test executable to exercise the real spawning primitive.
 
 **Interfaces:**
 
