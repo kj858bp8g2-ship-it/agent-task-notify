@@ -1,0 +1,5 @@
+{
+  "name": "agent-task-notify",
+  "version": "0.1.0",
+  "description": "Experimental Windows local-task notifications; desktop loading and cancellation are not verified."
+}
