@@ -12,5 +12,22 @@
   "internal/secrets/interaction_darwin.go",
   "internal/secrets/vault_test.go",
   "internal/secrets/native_windows_test.go",
-  "internal/secrets/native_darwin_test.go"
+  "internal/secrets/native_darwin_test.go",
+  "internal/store/files.go",
+  "internal/store/files_windows.go",
+  "internal/store/files_darwin.go",
+  "internal/store/acl_darwin.go",
+  "internal/store/lock.go",
+  "internal/store/lock_windows.go",
+  "internal/store/lock_darwin.go",
+  "internal/store/files_test.go",
+  "internal/store/files_windows_test.go",
+  "internal/store/files_darwin_test.go",
+  "internal/store/lock_test.go",
+  "internal/worker/spawn.go",
+  "internal/worker/spawn_windows.go",
+  "internal/worker/spawn_darwin.go",
+  "internal/worker/delivery.go",
+  "internal/worker/spawn_test.go",
+  "internal/worker/delivery_test.go"
 ]
