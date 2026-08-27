@@ -101,6 +101,9 @@ func TestPayloadWhitelistsAllAgentsAndVariants(t *testing.T) {
 				if _, present := b["icon"]; !present {
 					t.Fatalf("missing icon for %s", ids[index])
 				}
+				if ids[index] == "codex" && string(b["icon"]) != `"https://example.test/codex.png"` {
+					t.Fatalf("icon override was not preserved: %s", b["icon"])
+				}
 			}
 		})
 	}
@@ -118,7 +121,8 @@ func TestPayloadWhitelistsAllAgentsAndVariants(t *testing.T) {
 			t.Fatal(r.Diagnostic)
 		}
 	}
-	if string(bodies[0]["call"]) != "1" || string(bodies[1]["title"]) != `"Codex 任务需要关注"` || string(bodies[2]["title"]) != `"Codex 通知预览"` || string(bodies[2]["body"]) != `"这是一条通用测试通知。"` {
+	const terminalBody = `"任务已停止，请查看应用。耗时约 2 分钟。"`
+	if string(bodies[0]["call"]) != "1" || string(bodies[0]["title"]) != `"Codex 长任务已停止"` || string(bodies[0]["body"]) != terminalBody || string(bodies[1]["title"]) != `"Codex 任务需要关注"` || string(bodies[1]["body"]) != terminalBody || string(bodies[2]["title"]) != `"Codex 通知预览"` || string(bodies[2]["body"]) != `"这是一条通用测试通知。"` {
 		t.Fatal("copy/continuous mismatch")
 	}
 	s.Continuous = false
@@ -145,7 +149,19 @@ func TestCredentialBoundaryAndNoLeakedMarkers(t *testing.T) {
 			t.Fatal("credential leak", e)
 		}
 	}
-	for _, v := range []string{"http://example.test/topic", "https://user:pass@example.test/topic", "https://example.test/topic?q=1", "https://example.test/topic#f", "https://example.test/a%2Fb", "https://example.test/a\\b", "https://example.test/a b", "https://example.test/a/../topic", "https://example.test/./topic", "https://example.test/topic/", "https://example.test/a/b"} {
+	for _, tc := range []struct {
+		raw  string
+		want providers.Credential
+	}{
+		{`{"endpoint":"https://example.test/topic","token":"synthetic"}`, providers.Credential{Endpoint: "https://example.test/topic", Token: "synthetic"}},
+		{`{"endpoint":"https://example.test/topic","allowUnauthenticated":true}`, providers.Credential{Endpoint: "https://example.test/topic", AllowUnauthenticated: true}},
+	} {
+		credential, e := providers.ParseCredential("ntfy", []byte(tc.raw))
+		if e != nil || credential != tc.want {
+			t.Fatalf("valid optional ntfy credential %s: %#v %v", tc.raw, credential, e)
+		}
+	}
+	for _, v := range []string{"http://example.test/topic", "https://user:pass@example.test/topic", "https://example.test/topic?q=1", "https://example.test/topic#f", "https://example.test/topic?", "https://example.test/topic#", "https://example.test/a%2Fb", "https://example.test/a\\b", "https://example.test/a b", "https://example.test/a/../topic", "https://example.test/./topic", "https://example.test/topic/", "https://example.test/a/b"} {
 		if e := providers.ValidateCredential("ntfy", providers.Credential{Endpoint: v, Token: "token"}); e == nil {
 			t.Fatal("unsafe", v)
 		}

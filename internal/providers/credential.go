@@ -38,25 +38,26 @@ func ParseCredential(provider string, data []byte) (Credential, error) {
 		return Credential{}, errCredential
 	}
 	credential := Credential{Endpoint: endpoint}
-	if provider == "bark" {
-		if len(object) != 1 {
-			return Credential{}, errCredential
-		}
-	} else {
-		if len(object) != 3 {
-			return Credential{}, errCredential
-		}
-		tokenRaw, tokenOK := object["token"]
-		allowRaw, allowOK := object["allowUnauthenticated"]
-		if !tokenOK || !allowOK {
-			return Credential{}, errCredential
-		}
-		credential.Token, err = strictjson.String(tokenRaw)
-		if err != nil {
-			return Credential{}, errCredential
-		}
-		credential.AllowUnauthenticated, err = strictjson.Boolean(allowRaw)
-		if err != nil {
+	for key, value := range object {
+		switch key {
+		case "endpoint":
+		case "token":
+			if provider != "ntfy" {
+				return Credential{}, errCredential
+			}
+			credential.Token, err = strictjson.String(value)
+			if err != nil {
+				return Credential{}, errCredential
+			}
+		case "allowUnauthenticated":
+			if provider != "ntfy" {
+				return Credential{}, errCredential
+			}
+			credential.AllowUnauthenticated, err = strictjson.Boolean(value)
+			if err != nil {
+				return Credential{}, errCredential
+			}
+		default:
 			return Credential{}, errCredential
 		}
 	}
@@ -70,7 +71,7 @@ func ValidateCredential(provider string, credential Credential) error {
 	if provider != "bark" && provider != "ntfy" {
 		return errCredential
 	}
-	if len(credential.Endpoint) == 0 || len(credential.Endpoint) > maxCredentialBytes || strings.IndexFunc(credential.Endpoint, unicode.IsSpace) >= 0 || strings.ContainsAny(credential.Endpoint, "\\%") {
+	if len(credential.Endpoint) == 0 || len(credential.Endpoint) > maxCredentialBytes || strings.IndexFunc(credential.Endpoint, unicode.IsSpace) >= 0 || strings.ContainsAny(credential.Endpoint, "\\%?#") {
 		return errCredential
 	}
 	if provider == "bark" && (credential.Token != "" || credential.AllowUnauthenticated) {
