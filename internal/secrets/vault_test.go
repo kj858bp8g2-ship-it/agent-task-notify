@@ -2,16 +2,20 @@ package secrets
 
 import (
 	"bytes"
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // These tests catch plaintext storage, lost authentication/scope, permissive
@@ -275,4 +279,68 @@ func TestAESGCMUsesCanonicalScopeAndNoncePrefix(t *testing.T) {
 	b, _ = json.Marshal(fields)
 	_, err = v.Unprotect("backup:codex", b)
 	requireSafeError(t, err)
+}
+
+// Catches a timeout implementation that returns without killing/reaping the
+// blocked child, or prevents the parent's registered cleanup from completing.
+func TestBlockedTestProcessTimeoutReapsAndCleansUp(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "synthetic-ready")
+	cleaned := false
+	t.Run("bounded child", func(t *testing.T) {
+		t.Cleanup(func() {
+			if os.Remove(marker) != nil {
+				t.Error("synthetic cleanup failed")
+			}
+			cleaned = true
+		})
+		start := time.Now()
+		state, timedOut, err := runBoundedTestProcess(2*time.Second, "TestSyntheticBlockedProcess", nil,
+			[]string{"ATN_TEST_BLOCK_CHILD=1", "ATN_TEST_READY_FILE=" + marker})
+		if !timedOut || err == nil || state == nil || state.Success() {
+			t.Fatal("blocked child was not terminated and reaped")
+		}
+		if time.Since(start) > 5*time.Second {
+			t.Fatal("child wait exceeded bound")
+		}
+		if b, err := os.ReadFile(marker); err != nil || string(b) != "ready" {
+			t.Fatal("child did not reach blocking operation")
+		}
+	})
+	if !cleaned {
+		t.Fatal("parent cleanup did not complete")
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("synthetic resource remained after cleanup")
+	}
+}
+
+func TestSyntheticBlockedProcess(t *testing.T) {
+	if os.Getenv("ATN_TEST_BLOCK_CHILD") != "1" {
+		t.Skip("subprocess-only synthetic fixture")
+	}
+	if os.WriteFile(os.Getenv("ATN_TEST_READY_FILE"), []byte("ready"), 0600) != nil {
+		t.Fatal("synthetic readiness failed")
+	}
+	// A real blocked process, not a mock or goroutine in the parent process.
+	<-time.After(30 * time.Second)
+	t.Fatal("parent did not terminate blocked fixture")
+}
+
+// Only test binaries are launched. Run waits for termination even on timeout,
+// so callers can safely execute parent-owned cleanup after this returns.
+func runBoundedTestProcess(timeout time.Duration, name string, input io.Reader, extraEnv []string) (*os.ProcessState, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	executable, err := os.Executable()
+	if err != nil {
+		return nil, false, err
+	}
+	cmd := exec.CommandContext(ctx, executable, "-test.run=^"+name+"$", "-test.count=1")
+	cmd.Env = append(os.Environ(), extraEnv...)
+	cmd.Stdin = input
+	// No captured output or diagnostic forwarding. This also bounds any
+	// internal pipe wait after cancellation; CommandContext kills the child.
+	cmd.WaitDelay = time.Second
+	err = cmd.Run()
+	return cmd.ProcessState, ctx.Err() == context.DeadlineExceeded, err
 }

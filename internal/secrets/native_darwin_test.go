@@ -3,6 +3,7 @@ package secrets
 import (
 	"bytes"
 	"context"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -118,6 +119,17 @@ func TestDarwinLockedKeychainBackgroundDenial(t *testing.T) {
 	if err != nil || !info.Mode().IsRegular() {
 		t.Fatal("unsafe CI fixture")
 	}
+	if os.Getenv("ATN_TEST_KEYCHAIN_CHILD") == "1" {
+		// The parent supplies only its newly generated synthetic account over
+		// stdin. A hung native call holds this child's mutex, never the parent's.
+		data, err := io.ReadAll(io.LimitReader(os.Stdin, 33))
+		if err != nil || !validID(string(data)) {
+			t.Fatal("invalid synthetic account")
+		}
+		_, err = Open(string(data), Background)
+		requireSafeError(t, err)
+		return
+	}
 	security := func(args ...string) error {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -138,17 +150,14 @@ func TestDarwinLockedKeychainBackgroundDenial(t *testing.T) {
 	if security("lock-keychain", resolved) != nil {
 		t.Fatal("fixture lock failed")
 	}
-	start := time.Now()
-	done := make(chan error, 1)
-	go func() { _, err := Open(id, Background); done <- err }()
-	select {
-	case err := <-done:
-		requireSafeError(t, err)
-	case <-time.After(5 * time.Second):
+	state, timedOut, err := runBoundedTestProcess(5*time.Second,
+		"TestDarwinLockedKeychainBackgroundDenial", strings.NewReader(id),
+		[]string{"ATN_TEST_KEYCHAIN_CHILD=1"})
+	if timedOut {
 		t.Fatal("background access exceeded denial deadline")
 	}
-	if time.Since(start) >= 5*time.Second {
-		t.Fatal("background access exceeded denial deadline")
+	if err != nil || state == nil || !state.Success() {
+		t.Fatal("background denial child failed")
 	}
 	if security("unlock-keychain", "-p", password, resolved) != nil {
 		t.Fatal("fixture unlock failed")
