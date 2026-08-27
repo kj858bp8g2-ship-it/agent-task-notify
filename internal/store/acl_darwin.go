@@ -3,6 +3,8 @@ package store
 /*
 #include <sys/types.h>
 #include <sys/acl.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <errno.h>
 #include <stdlib.h>
 
@@ -20,12 +22,36 @@ static int notify_acl_empty(acl_t acl) {
     return result == -1 && saved_errno == EINVAL;
 }
 
+// acl_get_* collapses a successful stat with no ACL property into NULL/ENOENT.
+// Query the property only after a successful extended stat instead: a missing
+// path, invalid fd, denied read, or unsupported operation must still fail closed.
+static int notify_filesec_empty(filesec_t security) {
+    int present = 0;
+    if (filesec_query_property(security, FILESEC_ACL, &present) != 0) return 0;
+    if (!present) return 1;
+    acl_t acl = NULL;
+    if (filesec_get_property(security, FILESEC_ACL, &acl) != 0) return 0;
+    return notify_acl_empty(acl);
+}
+
 static int notify_path_acl_empty(const char *path) {
-    return notify_acl_empty(acl_get_link_np(path, ACL_TYPE_EXTENDED));
+    filesec_t security = filesec_init();
+    if (security == NULL) return 0;
+    struct stat st;
+    int result = lstatx_np(path, &st, security) == 0 &&
+        (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) && notify_filesec_empty(security);
+    filesec_free(security);
+    return result;
 }
 
 static int notify_fd_acl_empty(int fd) {
-    return notify_acl_empty(acl_get_fd_np(fd, ACL_TYPE_EXTENDED));
+    filesec_t security = filesec_init();
+    if (security == NULL) return 0;
+    struct stat st;
+    int result = fstatx_np(fd, &st, security) == 0 &&
+        (S_ISREG(st.st_mode) || S_ISDIR(st.st_mode)) && notify_filesec_empty(security);
+    filesec_free(security);
+    return result;
 }
 
 static int notify_clear_new_acl(int fd) {

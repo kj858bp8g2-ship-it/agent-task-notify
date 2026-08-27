@@ -52,7 +52,7 @@ func TestDarwinPrivateDirectoryNativeStages(t *testing.T) {
 	defer cancelRun()
 	out, runErr := exec.CommandContext(runCtx, binary, filepath.Join(root, "c-owned")).Output()
 	// Even test diagnostics may emit only the fixed stage/numeric schema.
-	if !regexp.MustCompile(`\A(?:stage=(?:mkdir|open|fstat|owner|type|init|set-fd|get-fd|valid-fd|entry-fd|get-link|valid-link|entry-link|chmod) result=-?[0-9]+ errno=[0-9]+\n)+\z`).Match(out) {
+	if !regexp.MustCompile(`\A(?:stage=(?:mkdir|open|fstat|owner|type|init|set-fd|get-fd|valid-fd|entry-fd|get-link|valid-link|entry-link|statx-fd|statx-link|query-fd|query-link|present-fd|present-link|chmod) result=-?[0-9]+ errno=[0-9]+\n)+\z`).Match(out) {
 		t.Fatal("probe output schema rejected")
 	}
 	t.Logf("%s", out)
@@ -63,7 +63,8 @@ func TestDarwinPrivateDirectoryNativeStages(t *testing.T) {
 
 // Apple Libc posix1e/acl_entry.c documents the implementation's 0 entry /
 // -1 EINVAL end behavior; posix1e/acl_file.c uses fstatx_np/lstatx_np for retrieval.
-// Raw observations are intentionally collected before any production change.
+// Keep raw getter observations, but assert the explicit successful extended-stat
+// and property-query boundary rather than interpreting NULL/errno in isolation.
 const darwinACLProbeSource = `
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -89,6 +90,19 @@ static int inspect(acl_t acl, const char *valid_stage, const char *entry_stage) 
     emit(entry_stage, result, saved);
     acl_free(acl);
     return result == -1 && saved == EINVAL;
+}
+static int inspect_security(filesec_t security, const char *query_stage,
+    const char *present_stage, const char *valid_stage, const char *entry_stage) {
+    int present = 0;
+    errno = 0;
+    int result = filesec_query_property(security, FILESEC_ACL, &present), saved = errno;
+    emit(query_stage, result, saved);
+    if (result != 0) return 0;
+    emit(present_stage, present != 0, 0);
+    if (!present) return 1;
+    acl_t acl = NULL;
+    if (filesec_get_property(security, FILESEC_ACL, &acl) != 0) return 0;
+    return inspect(acl, valid_stage, entry_stage);
 }
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
@@ -123,11 +137,27 @@ int main(int argc, char **argv) {
     errno = 0;
     acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED); saved = errno;
     emit("get-fd", acl != NULL, saved);
-    ok = inspect(acl, "valid-fd", "entry-fd") && ok;
+    if (acl != NULL) acl_free(acl);
     errno = 0;
     acl = acl_get_link_np(argv[1], ACL_TYPE_EXTENDED); saved = errno;
     emit("get-link", acl != NULL, saved);
-    ok = inspect(acl, "valid-link", "entry-link") && ok;
+    if (acl != NULL) acl_free(acl);
+    filesec_t security = filesec_init();
+    if (security == NULL) { close(fd); return 1; }
+    errno = 0;
+    result = fstatx_np(fd, &st, security); saved = errno;
+    emit("statx-fd", result, saved);
+    ok = (result == 0 && inspect_security(security, "query-fd", "present-fd",
+        "valid-fd", "entry-fd")) && ok;
+    filesec_free(security);
+    security = filesec_init();
+    if (security == NULL) { close(fd); return 1; }
+    errno = 0;
+    result = lstatx_np(argv[1], &st, security); saved = errno;
+    emit("statx-link", result, saved);
+    ok = (result == 0 && inspect_security(security, "query-link", "present-link",
+        "valid-link", "entry-link")) && ok;
+    filesec_free(security);
     errno = 0;
     result = fchmod(fd, 0700); saved = errno;
     emit("chmod", result, saved);
@@ -136,6 +166,69 @@ int main(int argc, char **argv) {
     return ok ? 0 : 1;
 }
 `
+
+func TestDarwinACLAbsentPresentAndReadFailure(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal("fixture root unavailable")
+	}
+	for _, directory := range []bool{false, true} {
+		name := "file"
+		if directory {
+			name = "directory"
+		}
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(root, name)
+			if directory {
+				err = os.Mkdir(path, 0700)
+			} else {
+				err = os.WriteFile(path, nil, 0600)
+			}
+			if err != nil {
+				t.Fatal("fixture creation failed")
+			}
+			// Remove any inherited ACL from this test-created object only.
+			if exec.Command("/bin/chmod", "-N", path).Run() != nil {
+				t.Fatal("fixture ACL removal failed")
+			}
+			file, err := os.Open(path)
+			if err != nil {
+				t.Fatal("fixture open failed")
+			}
+			defer file.Close()
+			if !emptyPathACL(path) || !emptyFileACL(int(file.Fd())) {
+				t.Fatal("successful no-ACL query rejected")
+			}
+			addDarwinFixtureACL(t, path, false)
+			before := darwinACLListing(t, path)
+			if emptyPathACL(path) || emptyFileACL(int(file.Fd())) {
+				t.Fatal("nonempty ACL accepted")
+			}
+			if darwinACLListing(t, path) != before {
+				t.Fatal("ACL inspection changed fixture")
+			}
+		})
+	}
+	if emptyFileACL(-1) || clearNewFileACL(-1) {
+		t.Fatal("invalid descriptor accepted")
+	}
+	if emptyPathACL(filepath.Join(root, "missing")) {
+		t.Fatal("missing path mistaken for absent ACL")
+	}
+	if exec.Command("/bin/chmod", "-N", filepath.Join(root, "file")).Run() != nil {
+		t.Fatal("fixture ACL removal failed")
+	}
+	if !emptyPathACL(filepath.Join(root, "file")) {
+		t.Fatal("symlink target fixture is not ACL-free")
+	}
+	link := filepath.Join(root, "link")
+	if os.Symlink(filepath.Join(root, "file"), link) != nil {
+		t.Fatal("fixture symlink failed")
+	}
+	if emptyPathACL(link) {
+		t.Fatal("symlink accepted")
+	}
+}
 
 func readForReplacement(path string) ([]byte, error) { return os.ReadFile(path) }
 
