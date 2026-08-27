@@ -208,6 +208,82 @@ func TestDirectoryPrecedenceAndDefaultBase(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsPackageRootLinkedAncestor(t *testing.T) {
+	root := fixtureRoot(t)
+	real := filepath.Join(root, "real")
+	pkg := filepath.Join(real, "package")
+	if err := os.MkdirAll(pkg, 0700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if runtime.GOOS == "windows" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := exec.CommandContext(ctx, "cmd.exe", "/d", "/c", "mklink", "/J", alias, real).Run(); err != nil {
+			t.Fatal("test-owned junction creation failed")
+		}
+	} else if err := os.Symlink(real, alias); err != nil {
+		t.Fatal("test-owned symlink creation failed")
+	}
+	t.Cleanup(func() {
+		if err := os.Remove(alias); err != nil {
+			t.Error("test-owned link cleanup failed")
+		}
+	})
+	candidate := filepath.Join(pkg, "data")
+	if _, err := Open(candidate, filepath.Join(alias, "package")); err == nil {
+		t.Fatal("linked package ancestor bypassed isolation")
+	}
+	if _, err := os.Lstat(candidate); !os.IsNotExist(err) {
+		t.Fatal("package isolation check wrote state")
+	}
+	// Reject a linked exclusion root even if this candidate is unrelated.
+	if _, err := Open(filepath.Join(root, "outside"), filepath.Join(alias, "package")); err == nil {
+		t.Fatal("linked exclusion root accepted")
+	}
+}
+
+func TestWindowsPackageShortNameCannotBypassIsolation(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Windows short-name fixture")
+	}
+	root := fixtureRoot(t)
+	pkg := filepath.Join(root, "LongPackageDirectory")
+	if err := os.Mkdir(pkg, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// Query only this test-owned path. No recursive enumeration, mutation,
+	// short-name policy change or filesystem-wide 8.3 enablement is allowed.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, "cmd.exe", "/d", "/c", "for %I in (.) do @echo %~fsI")
+	command.Dir = pkg
+	out, err := command.Output()
+	if err != nil {
+		t.Fatal("short-name query failed")
+	}
+	short := strings.TrimSpace(string(out))
+	if strings.EqualFold(short, pkg) {
+		t.Skip("test volume does not provide a distinct 8.3 alias")
+	}
+	longInfo, err := os.Lstat(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	shortInfo, err := os.Lstat(short)
+	if err != nil || !os.SameFile(longInfo, shortInfo) {
+		t.Fatal("short-name fixture does not identify the same directory")
+	}
+	for _, paths := range [][2]string{{filepath.Join(pkg, "data"), short}, {filepath.Join(short, "data"), pkg}} {
+		if _, err := Open(paths[0], paths[1]); err == nil {
+			t.Fatal("directory alias bypassed package isolation")
+		}
+		if _, err := os.Lstat(paths[0]); !os.IsNotExist(err) {
+			t.Fatal("alias check created data")
+		}
+	}
+}
+
 var barkFixture = providers.Credential{Endpoint: "https://example.invalid/synthetic_bark_secret"}
 var ntfyFixture = providers.Credential{Endpoint: "https://example.invalid/synthetic_ntfy_topic", Token: "synthetic_ntfy_secret"}
 
@@ -551,5 +627,41 @@ func TestDarwinCredentialModesDoNotCreateMissingKey(t *testing.T) {
 	}
 	if after, _ := os.ReadFile(filepath.Join(r.Directory(), "installation.json")); !bytes.Equal(after, identity) {
 		t.Fatal("read replaced identity")
+	}
+}
+
+func TestConfigureExistingBundleUsesForegroundVaultOnce(t *testing.T) {
+	requireSyntheticProtection(t)
+	r := repositoryFixture(t)
+	save(t, r, "bark", barkFixture, `{"minSeconds":123}`)
+	identityPath := filepath.Join(r.Directory(), "installation.json")
+	identity, _ := os.ReadFile(identityPath)
+	var modes []secrets.AccessMode
+	// The permission boundary is controlled for this one invocation only.
+	// Foreground still opens a real DPAPI/CI-Keychain Vault; crypto, locking
+	// and the filesystem transaction are never mocked. This is not a UI test.
+	opener := func(mode secrets.AccessMode) (*secrets.Vault, error) {
+		modes = append(modes, mode)
+		if mode == secrets.Background {
+			return nil, errConfigurationUnavailable
+		}
+		return r.vaultLocked(mode)
+	}
+	if err := r.configure(context.Background(), "ntfy", ntfyFixture, []byte(`{"volume":7}`), opener); err != nil {
+		t.Fatal("foreground configure stopped at background authorization")
+	}
+	if !reflect.DeepEqual(modes, []secrets.AccessMode{secrets.Foreground}) {
+		t.Fatal("configuration must open exactly one foreground vault")
+	}
+	for provider, want := range map[string]providers.Credential{"bark": barkFixture, "ntfy": ntfyFixture} {
+		if got, err := r.Credential(provider, secrets.Background); err != nil || got != want {
+			t.Fatal("foreground transaction lost protected credentials")
+		}
+	}
+	if settings, err := r.Settings(); err != nil || settings.MinSeconds != 123 || settings.Volume != 7 || settings.Provider != "ntfy" {
+		t.Fatal("foreground transaction lost settings")
+	}
+	if after, _ := os.ReadFile(identityPath); !bytes.Equal(after, identity) {
+		t.Fatal("foreground authorization replaced identity")
 	}
 }

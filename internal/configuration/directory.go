@@ -12,7 +12,7 @@ import (
 	"github.com/kj858bp8g2-ship-it/agent-task-notify/internal/store"
 )
 
-type Repository struct{ directory, packageRoot string }
+type Repository struct{ directory, packageRoot, executableRoot string }
 
 // Open only resolves and validates paths; it never creates a data directory.
 func Open(explicitDirectory, packageRoot string) (*Repository, error) {
@@ -23,13 +23,6 @@ func Open(explicitDirectory, packageRoot string) (*Repository, error) {
 	exeRoot := filepath.Dir(exe)
 	if packageRoot == "" {
 		packageRoot = exeRoot
-	}
-	if !validDirectoryPath(packageRoot) {
-		return nil, errConfigurationUnavailable
-	}
-	info, err := os.Lstat(packageRoot)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		return nil, errConfigurationUnavailable
 	}
 	directory := explicitDirectory
 	if directory == "" {
@@ -53,8 +46,8 @@ func Open(explicitDirectory, packageRoot string) (*Repository, error) {
 		}
 		directory = filepath.Join(base, "AgentTaskNotifyNative")
 	}
-	r := &Repository{directory: directory, packageRoot: packageRoot}
-	if !validDirectoryPath(directory) || within(directory, packageRoot) || within(directory, exeRoot) || r.checkDirectory() != nil {
+	r := &Repository{directory: directory, packageRoot: packageRoot, executableRoot: exeRoot}
+	if r.checkDirectory() != nil {
 		return nil, errConfigurationUnavailable
 	}
 	return r, nil
@@ -88,6 +81,28 @@ func (r *Repository) checkDirectory() error {
 	} else if err != nil || !info.IsDir() || store.CheckPrivateDirectory(r.directory) != nil {
 		return errConfigurationUnavailable
 	}
+	for _, root := range []string{r.packageRoot, r.executableRoot} {
+		rootInfo, err := exclusionDirectory(root)
+		if err != nil {
+			return errConfigurationUnavailable
+		}
+		// Text aliases (including Windows 8.3 names) must not turn package
+		// contents into a seemingly independent data directory. Compare every
+		// existing candidate ancestor with the actual exclusion-root identity.
+		for current := r.directory; ; current = filepath.Dir(current) {
+			info, err := os.Lstat(current)
+			if err != nil {
+				if current != r.directory || !os.IsNotExist(err) {
+					return errConfigurationUnavailable
+				}
+			} else if !os.SameFile(info, info) || os.SameFile(info, rootInfo) {
+				return errConfigurationUnavailable
+			}
+			if filepath.Dir(current) == current {
+				break
+			}
+		}
+	}
 	// Local, metadata-only source detection: no directory enumeration or marker
 	// contents. This deliberately rejects any Git ancestor, not just this repo.
 	for current := r.directory; ; current = filepath.Dir(current) {
@@ -99,6 +114,33 @@ func (r *Repository) checkDirectory() error {
 		}
 	}
 	return nil
+}
+
+// Validate exclusion roots too: checking the data path cannot detect a link
+// hidden in the spelling of an independent package/executable root.
+func exclusionDirectory(path string) (os.FileInfo, error) {
+	if !validDirectoryPath(path) {
+		return nil, errConfigurationUnavailable
+	}
+	var rootInfo os.FileInfo
+	for current := path; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err != nil || !info.IsDir() || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 {
+			return nil, errConfigurationUnavailable
+		}
+		if current == path {
+			rootInfo = info
+		}
+		if filepath.Dir(current) == current {
+			break
+		}
+	}
+	// On Windows SameFile may lazily fail to load a file ID and return false.
+	// Do not confuse an unavailable identity with a distinct directory.
+	if !os.SameFile(rootInfo, rootInfo) {
+		return nil, errConfigurationUnavailable
+	}
+	return rootInfo, nil
 }
 
 func hasSourceMarker(directory string) bool {

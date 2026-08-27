@@ -81,6 +81,13 @@ func validMode(mode secrets.AccessMode) bool {
 }
 
 func (r *Repository) Configure(ctx context.Context, provider string, credential providers.Credential, settingsPatch []byte) error {
+	return r.configure(ctx, provider, credential, settingsPatch, r.vaultLocked)
+}
+
+// The public entry always supplies the installation-scoped, lock-held opener.
+// A per-call parameter keeps mode sequencing testable without global switches
+// or replacing the real Vault, encryption, locks or atomic filesystem commit.
+func (r *Repository) configure(ctx context.Context, provider string, credential providers.Credential, settingsPatch []byte, openVault func(secrets.AccessMode) (*secrets.Vault, error)) error {
 	if ctx == nil || !validProvider(provider) || !utf8.ValidString(credential.Endpoint) || !utf8.ValidString(credential.Token) || providers.ValidateCredential(provider, credential) != nil {
 		return errConfigurationInvalid
 	}
@@ -111,20 +118,23 @@ func (r *Repository) Configure(ctx context.Context, provider string, credential 
 	if err != nil {
 		return errConfigurationInvalid
 	}
-	if found {
-		if _, err := r.checkCredentials(state); err != nil {
-			return err
-		}
-	}
 	plain, err := json.Marshal(credential)
 	if err != nil {
 		return errConfigurationInvalid
 	}
 	defer clear(plain)
 	// Configure already holds configuration.lock; never call public Vault here.
-	vault, err := r.vaultLocked(secrets.Foreground)
+	vault, err := openVault(secrets.Foreground)
 	if err != nil {
 		return err
+	}
+	// A deliberate foreground configuration must be able to authorize the
+	// existing key. Reuse this one vault for old-envelope authentication and
+	// the new protection; a Background preflight would prevent authorization.
+	if found {
+		if err := checkCredentialsWithVault(state, vault); err != nil {
+			return err
+		}
 	}
 	envelope, err := vault.Protect("credential:"+provider, plain)
 	if err != nil {
@@ -328,12 +338,19 @@ func (r *Repository) checkCredentials(state bundle) (*secrets.Vault, error) {
 	if err != nil {
 		return nil, err
 	}
-	for provider, envelope := range state.Credentials {
-		if _, err := decodeCredential(vault, provider, envelope); err != nil {
-			return nil, err
-		}
+	if err := checkCredentialsWithVault(state, vault); err != nil {
+		return nil, err
 	}
 	return vault, nil
+}
+
+func checkCredentialsWithVault(state bundle, vault *secrets.Vault) error {
+	for provider, envelope := range state.Credentials {
+		if _, err := decodeCredential(vault, provider, envelope); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func decodeCredential(vault *secrets.Vault, provider string, envelope []byte) (providers.Credential, error) {
