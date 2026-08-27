@@ -1,12 +1,138 @@
 package store
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"testing"
+	"time"
 )
+
+// This synthetic-only probe distinguishes directory checks from native ACL
+// retrieval, validation, and empty-entry semantics. No production hook is used.
+func TestDarwinPrivateDirectoryNativeStages(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal("fixture root unavailable")
+	}
+	owned := filepath.Join(root, "go-owned")
+	if !safePath(owned, true) {
+		t.Error("stage=go-safe-before result=0")
+	} else {
+		t.Log("stage=go-safe-before result=1")
+	}
+	if nativeMkdir(owned) != nil {
+		t.Error("stage=go-mkdir result=0")
+	} else {
+		t.Log("stage=go-mkdir result=1")
+	}
+	if !safePath(owned, false) {
+		t.Error("stage=go-safe-after result=0")
+	} else {
+		t.Log("stage=go-safe-after result=1")
+	}
+	if !nativePrivate(owned, true) {
+		t.Error("stage=go-private result=0")
+	} else {
+		t.Log("stage=go-private result=1")
+	}
+	source := filepath.Join(root, "probe.c")
+	if os.WriteFile(source, []byte(darwinACLProbeSource), 0600) != nil {
+		t.Fatal("probe source unavailable")
+	}
+	binary := filepath.Join(root, "probe")
+	compileCtx, cancelCompile := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelCompile()
+	if exec.CommandContext(compileCtx, "/usr/bin/clang", "-Wall", "-Wextra", "-Werror", source, "-o", binary).Run() != nil {
+		t.Fatal("stage=probe-compile result=0")
+	}
+	runCtx, cancelRun := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelRun()
+	out, runErr := exec.CommandContext(runCtx, binary, filepath.Join(root, "c-owned")).Output()
+	// Even test diagnostics may emit only the fixed stage/numeric schema.
+	if !regexp.MustCompile(`\A(?:stage=[a-z-]+ result=-?[0-9]+ errno=[0-9]+\n)+\z`).Match(out) {
+		t.Fatal("probe output schema rejected")
+	}
+	t.Logf("%s", out)
+	if runErr != nil {
+		t.Error("stage=probe-run result=0")
+	}
+}
+
+// Apple Libc posix1e/acl_entry.c documents the implementation's 0 entry /
+// -1 EINVAL end behavior; posix1e/acl_file.c uses fstatx_np/lstatx_np for retrieval.
+// Raw observations are intentionally collected before any production change.
+const darwinACLProbeSource = `
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/acl.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <unistd.h>
+
+static void emit(const char *stage, int result, int saved_errno) {
+    printf("stage=%s result=%d errno=%d\n", stage, result, saved_errno);
+}
+static int inspect(acl_t acl, const char *valid_stage, const char *entry_stage) {
+    if (acl == NULL) return 0;
+    errno = 0;
+    int valid = acl_valid(acl), saved = errno;
+    emit(valid_stage, valid, saved);
+    if (valid != 0) { acl_free(acl); return 0; }
+    acl_entry_t entry;
+    errno = 0;
+    int result = acl_get_entry(acl, ACL_FIRST_ENTRY, &entry);
+    saved = errno;
+    emit(entry_stage, result, saved);
+    acl_free(acl);
+    return result == -1 && saved == EINVAL;
+}
+int main(int argc, char **argv) {
+    if (argc != 2) return 2;
+    errno = 0;
+    int result = mkdir(argv[1], 0700), saved = errno;
+    emit("mkdir", result, saved);
+    if (result != 0) return 1;
+    errno = 0;
+    int fd = open(argv[1], O_RDONLY|O_DIRECTORY|O_NOFOLLOW|O_CLOEXEC);
+    saved = errno;
+    emit("open", fd >= 0, saved);
+    if (fd < 0) return 1;
+    struct stat st;
+    errno = 0;
+    result = fstat(fd, &st); saved = errno;
+    emit("fstat", result, saved);
+    int safe = result == 0 && st.st_uid == geteuid() && S_ISDIR(st.st_mode);
+    emit("owned-directory", safe, 0);
+    if (!safe) { close(fd); return 1; }
+    errno = 0;
+    acl_t acl = acl_init(0); saved = errno;
+    emit("init", acl != NULL, saved);
+    if (acl == NULL) { close(fd); return 1; }
+    errno = 0;
+    result = acl_set_fd_np(fd, acl, ACL_TYPE_EXTENDED); saved = errno;
+    emit("set-fd", result, saved);
+    acl_free(acl);
+    int ok = result == 0;
+    errno = 0;
+    acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED); saved = errno;
+    emit("get-fd", acl != NULL, saved);
+    ok = inspect(acl, "valid-fd", "entry-fd") && ok;
+    errno = 0;
+    acl = acl_get_link_np(argv[1], ACL_TYPE_EXTENDED); saved = errno;
+    emit("get-link", acl != NULL, saved);
+    ok = inspect(acl, "valid-link", "entry-link") && ok;
+    errno = 0;
+    result = fchmod(fd, 0700); saved = errno;
+    emit("chmod", result, saved);
+    ok = result == 0 && ok;
+    close(fd);
+    return ok ? 0 : 1;
+}
+`
 
 func readForReplacement(path string) ([]byte, error) { return os.ReadFile(path) }
 
