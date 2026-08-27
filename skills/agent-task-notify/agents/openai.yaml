@@ -1,0 +1,6 @@
+interface:
+  display_name: "Agent Task Notify"
+  short_description: "Configure private local task notifications safely."
+  default_prompt: "Use $agent-task-notify to configure a supported local task notification adapter."
+policy:
+  allow_implicit_invocation: true
