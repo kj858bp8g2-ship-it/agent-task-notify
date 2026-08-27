@@ -25,8 +25,9 @@ platform; it is not replaced with plaintext storage or a CLI fallback.
 
 Every matrix job uses Go `1.27.0` and runs `go mod verify`,
 `go test -count=1 ./...`, `go vet ./...`, and a `go build -trimpath` candidate
-build. Artifact names contain the actual GitHub runner OS and architecture. A
-macOS artifact additionally contains `UNSIGNED-CANDIDATE.txt`: it is a CI test
+build. Artifact names contain the matrix runner label plus the actual GitHub
+runner OS and architecture, so concurrent matrix jobs do not share an artifact
+name. A macOS artifact additionally contains `UNSIGNED-CANDIDATE.txt`: it is a CI test
 candidate, not a stable/compatible release, and it contains no Gatekeeper or
 quarantine-bypass instruction.
 
