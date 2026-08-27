@@ -229,7 +229,7 @@ Implement a single fixed retry-delay slice and a single extension branch after a
 
 ### Task 4: Real platform CI gates and candidate evidence
 
-**Files:** Create `.github/workflows/native.yml`, `scripts/native-ci-macos.sh`, `docs/native-validation.md`; extend native manifest.
+**Files:** Create `.github/workflows/native.yml`, `scripts/native-ci-macos.sh`, `docs/native-validation.md`, `tests/native_ci_test.go`; extend native manifest. The focused CI regression file covers refusal before Keychain commands, partial-configuration cleanup through an isolated fake command boundary, and matrix-unique artifact names. It must never execute a real Keychain command locally.
 
 **Interfaces:** Consume `go test ./...`, `go vet ./...`, the version command and platform tests. No release publication or auto-install entry point in this task. CI is read-only except its ephemeral checkout/test fixtures and workflow artifacts.
 
