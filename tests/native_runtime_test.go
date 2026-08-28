@@ -31,6 +31,42 @@ var nativeRoot, nativeBinary string
 var nativePreserve bool
 var nativeFixtureNumber int
 
+// Catches confusing the private-state 0600 contract with executable metadata.
+// This fixture uses synthetic bytes only: no build, process, or Keychain access.
+func TestNativeExecutableFixturePolicyBoundary(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal("fixture root unavailable")
+	}
+	owned := filepath.Join(root, "owned")
+	if err := store.EnsurePrivateDirectory(owned); err != nil {
+		t.Fatal("owned fixture unavailable")
+	}
+	path := filepath.Join(owned, "synthetic executable")
+	want := []byte("synthetic executable bytes\x00\xff")
+	if err := finalizeNativeExecutable(path, want); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := hostfile.Read(path, 1024)
+	if err != nil || !snapshot.Exists || !bytes.Equal(snapshot.Data, want) {
+		t.Fatal("executable host read-back failed")
+	}
+	if runtime.GOOS == "darwin" {
+		info, err := os.Lstat(path)
+		if err != nil || info.Mode() != 0700 {
+			t.Fatal("executable mode not established")
+		}
+		if _, err := store.ReadPrivate(path, 1024); err == nil {
+			t.Fatal("private state accepted executable mode")
+		}
+	} else {
+		got, err := store.ReadPrivate(path, 1024)
+		if err != nil || !bytes.Equal(got, want) {
+			t.Fatal("private owner/bytes check failed")
+		}
+	}
+}
+
 func TestMain(m *testing.M) {
 	code := m.Run()
 	if nativeRoot != "" && !nativePreserve {
@@ -105,29 +141,40 @@ func nativeExecutable(t *testing.T) string {
 		nativeBinary = filepath.Join(pkg, name)
 		// The build output may use the runner's group TokenOwner. Initialize a
 		// distinct, absent final file explicitly; never repair the raw object's owner.
-		if err = store.WriteAtomic(nativeBinary, data); err != nil {
-			nativeBuildError = err
-			return
-		}
-		if runtime.GOOS != "windows" {
-			if err = os.Chmod(nativeBinary, 0700); err != nil {
-				nativeBuildError = err
-				return
-			}
-		}
-		if _, err = store.ReadPrivate(nativeBinary, 64<<20); err != nil {
-			nativeBuildError = err
-			return
-		}
-		if _, err = hostfile.Read(nativeBinary, 64<<20); err != nil {
-			nativeBuildError = err
-			return
-		}
+		nativeBuildError = finalizeNativeExecutable(nativeBinary, data)
 	})
 	if nativeBuildError != nil {
 		t.Fatal(nativeBuildError)
 	}
 	return nativeBinary
+}
+
+// Creation uses the private-state policy to select owner and ACL explicitly.
+// Darwin ReadPrivate requires exactly 0600: verify those bytes BEFORE changing
+// this newly created package file into a 0700 executable. The final artifact
+// belongs to hostfile's owned-regular-file contract, not private state storage.
+func finalizeNativeExecutable(path string, data []byte) error {
+	if err := store.WriteAtomic(path, data); err != nil {
+		return errors.New("native executable fixture: private-write")
+	}
+	readback, err := store.ReadPrivate(path, 64<<20)
+	if err != nil || !bytes.Equal(readback, data) {
+		return errors.New("native executable fixture: private-readback")
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0700); err != nil {
+			return errors.New("native executable fixture: executable-mode")
+		}
+	}
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || (runtime.GOOS != "windows" && info.Mode() != 0700) {
+		return errors.New("native executable fixture: executable-mode")
+	}
+	snapshot, err := hostfile.Read(path, 64<<20)
+	if err != nil || !snapshot.Exists || !bytes.Equal(snapshot.Data, data) {
+		return errors.New("native executable fixture: host-readback")
+	}
+	return nil
 }
 
 type nativeFixture struct {
