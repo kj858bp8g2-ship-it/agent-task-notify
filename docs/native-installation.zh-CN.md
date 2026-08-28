@@ -14,7 +14,9 @@
 go run ./cmd/package-native verify --archive ABS_ARCHIVE --checksums ABS_SHA256SUMS --platform PLATFORM --version 0.2.0-rc.1 --extract-to ABS_NEW_FOLDER
 ```
 
-占位符换成绝对路径，空格路径需引号。工具先验证哈希、精确名称/清单、大小、权限、平台、架构、两份相同程序和 manifest，再运行解出的程序；只接受当前 OS/架构。**调用者必须为新的 extract-to 目录选择源码外、已存在且自有的父目录**：隔离测试目录位于 extract-to 的同级，验证器本身不保证选址在源码外。它创建新的明确用户自有目录，隔离 HOME/用户数据/temp/CWD、清空 PATH，运行 version、doctor 和六个干预前预览，不发通知、不打开 Keychain。开发验证器需要对应 artifact 的单条 SHA256SUMS；若使用发布的合并校验文件，先将唯一匹配归档名的原始条目保存到独立本地文件，勿改哈希。它是开发工具，不是最终用户依赖。通知程序本身无需额外安装 PowerShell、Node、Python 或 Go；Agent 自身运行时及已验证的宿主命令 shell 仍由宿主提供。
+路径占位符须换成**经过清理规范化的 OS 原生绝对路径**，不能仅是 shell 认为可用的绝对字符串。开发验证器要求 `filepath.Clean(path) == path`：避免 `.`/`..`、多余分隔符及非根路径的末尾分隔符；Windows 使用原生反斜杠，不用正斜杠或混合分隔符。在 Windows PowerShell 中，已有归档/校验文件通过 `(Get-Item -LiteralPath 'ABS_ARCHIVE').FullName` 取得路径（校验文件同理）；已选定但仍不存在的新目标用 `[IO.Path]::GetFullPath('ABS_NEW_FOLDER')` 规范化。先将占位符换成所选绝对位置，传递所得值时加引号，尤其含空格时，例如 `--archive "$archive" --checksums "$checksums" --extract-to "$extract"`。这只是调用路径格式处理，不修复权限、不绕过其余检查。
+
+工具先验证哈希、精确名称/清单、大小、权限、平台、架构、两份相同程序和 manifest，再运行解出的程序；只接受当前 OS/架构。**调用者必须为新的 extract-to 目录选择源码外、已存在且自有的父目录**：隔离测试目录位于 extract-to 的同级，验证器本身不保证选址在源码外。它创建新的明确用户自有目录，隔离 HOME/用户数据/temp/CWD、清空 PATH，运行 version、doctor 和六个干预前预览，不发通知、不打开 Keychain。开发验证器需要对应 artifact 的单条 SHA256SUMS；若使用发布的合并校验文件，先将唯一匹配归档名的原始条目保存到独立本地文件，勿改哈希。它是开发工具，不是最终用户依赖。通知程序本身无需额外安装 PowerShell、Node、Python 或 Go；Agent 自身运行时及已验证的宿主命令 shell 仍由宿主提供。
 
 ## 先检查、配置，再显式安装
 
