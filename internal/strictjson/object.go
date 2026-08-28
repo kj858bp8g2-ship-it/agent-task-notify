@@ -24,6 +24,7 @@ func Object(data []byte) (map[string]json.RawMessage, error) {
 		return nil, ErrInvalid
 	}
 	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
 	token, err := decoder.Token()
 	if err != nil {
 		return nil, ErrInvalid

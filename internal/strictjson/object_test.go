@@ -55,6 +55,15 @@ func TestScalarHelpersAreStrict(t *testing.T) {
 	}
 }
 
+func TestObjectRetainsUnknownNumericLexemes(t *testing.T) {
+	for _, number := range []string{"1e400", "-1.23400e-999", "9007199254740993123456789"} {
+		object, err := Object([]byte(`{"unknown":{"value":` + number + `}}`))
+		if err != nil || string(object["unknown"]) != `{"value":`+number+`}` {
+			t.Fatal("unknown JSON number rejected or rounded")
+		}
+	}
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a

@@ -1,10 +1,14 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { isAbsolute } from 'node:path';
 
 export function createAgentTaskNotify(options = {}) {
   const spawn = options.spawn ?? nodeSpawn;
   const hookPath = options.hookPath ?? fileURLToPath(new URL('../../scripts/agent-task-notify.ps1', import.meta.url));
-  return async ({ client, agentTaskNotifyDataDirectory }) => {
+  return async (context) => {
+    const { client, agentTaskNotifyDataDirectory } = context;
+    const native = Object.hasOwn(options, 'executable') || Object.hasOwn(context, 'agentTaskNotifyExecutable');
+    const executable = Object.hasOwn(options, 'executable') ? options.executable : context.agentTaskNotifyExecutable;
     const active = new Map(), seen = new Set(), queues = new Map(), depths = new Map(), reported = new Set();
     const timeoutMs = Math.min(10000, Math.max(10, options.timeoutMs ?? 5000));
     // One fixed code per failure class per plugin instance, never host error text.
@@ -16,9 +20,12 @@ export function createAgentTaskNotify(options = {}) {
       Promise.resolve().then(()=>client.session.get({path:{id}})).then(value=>{if(!done)finish(value)},()=>{if(!done){diagnose('bridge-metadata');finish(null)}});
     });
     const send = (event, sessionId, runId) => new Promise(resolve => {
-      const args = ['-NoLogo','-NoProfile','-NonInteractive','-File',hookPath,'-Mode','Hook','-Agent','opencode'];
+      if (native && (typeof executable !== 'string' || !isAbsolute(executable) || /[\u0000-\u001f\u007f]/u.test(executable))) {
+        diagnose('bridge-native-unavailable');resolve(false);return;
+      }
+      const args = native ? ['hook','--agent','opencode'] : ['-NoLogo','-NoProfile','-NonInteractive','-File',hookPath,'-Mode','Hook','-Agent','opencode'];
       const dataDirectory = options.dataDirectory ?? agentTaskNotifyDataDirectory ?? process.env.ATN_DATA_DIRECTORY;
-      if (dataDirectory) args.push('-DataDirectory',dataDirectory);
+      if (dataDirectory) args.push(native ? '--data-directory' : '-DataDirectory',dataDirectory);
       let child, done=false, timer;
       const finish=code=>{
         if(done)return;done=true;clearTimeout(timer);
@@ -26,7 +33,7 @@ export function createAgentTaskNotify(options = {}) {
         resolve(!code);
       };
       try {
-        child = spawn('pwsh', args, { windowsHide:true, shell:false, stdio:['pipe','ignore','ignore'] });
+        child = spawn(native ? executable : 'pwsh', args, { windowsHide:true, shell:false, stdio:['pipe','ignore','ignore'] });
         child.on('error',()=>finish('bridge-spawn'));child.on('close',code=>finish(code===0?null:'bridge-exit'));
         child.stdin.on('error',()=>finish('bridge-stdin'));
         timer=setTimeout(()=>finish('bridge-timeout'),timeoutMs);

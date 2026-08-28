@@ -71,9 +71,9 @@ test('Stop cannot overtake a delayed Start subprocess completion', async()=>{
 
 test('bridge bounds stalled children/metadata and redacts all error classes', async()=>{
   const {createAgentTaskNotify}=await import('../integrations/opencode/bridge.mjs');
-  for (const mode of ['spawn','stdin','exit','timeout','metadata','metadata-timeout','metadata-shape']) {
+  for (const native of [false,true]) for (const mode of ['spawn','stdin','exit','timeout','metadata','metadata-timeout','metadata-shape']) {
     const codes=[];let killed=false;let spawned=0;
-    const plugin=await createAgentTaskNotify({timeoutMs:30,diagnostic:code=>codes.push(code),spawn(){
+    const plugin=await createAgentTaskNotify({...(native?{executable:process.execPath}:{}),timeoutMs:30,diagnostic:code=>codes.push(code),spawn(){
       spawned++;if(mode==='spawn')throw Error('PRIVATE https://secret.invalid');
       const child=new EventEmitter();child.stdin=new EventEmitter();child.kill=()=>{killed=true};
       child.stdin.end=()=>{if(mode==='stdin')queueMicrotask(()=>child.stdin.emit('error',Error('PRIVATE')));else if(mode==='exit')queueMicrotask(()=>child.emit('close',1));};
@@ -97,4 +97,60 @@ test('bridge environment data default yields to explicit option', async()=>{
       assert.equal(actual,explicit??directory);
     }
   } finally {if(previous===undefined)delete process.env.ATN_DATA_DIRECTORY;else process.env.ATN_DATA_DIRECTORY=previous;await rm(directory,{recursive:true,force:true});}
+});
+
+test('explicit native options and context select direct spawn with exact precedence', async()=>{
+  const {createAgentTaskNotify}=await import('../integrations/opencode/bridge.mjs');
+  const executable=join(tmpdir(),"synthetic package 中文's",'agent-task-notify');
+  const contextExecutable=join(tmpdir(),'context-notifier');
+  const directory=join(tmpdir(),"synthetic data 中文's");
+  const previous=process.env.ATN_DATA_DIRECTORY;
+  try {
+    process.env.ATN_DATA_DIRECTORY=join(tmpdir(),'env-data');
+    for (const scenario of [
+      {options:{executable,dataDirectory:directory},context:{agentTaskNotifyExecutable:contextExecutable,agentTaskNotifyDataDirectory:'context-data'},exe:executable,data:directory},
+      {options:{},context:{agentTaskNotifyExecutable:contextExecutable,agentTaskNotifyDataDirectory:directory},exe:contextExecutable,data:directory},
+      {options:{executable,dataDirectory:null},context:{agentTaskNotifyDataDirectory:directory},exe:executable,data:directory},
+      {options:{executable},context:{},exe:executable,data:process.env.ATN_DATA_DIRECTORY},
+      {options:{executable,dataDirectory:''},context:{agentTaskNotifyDataDirectory:directory},exe:executable,data:undefined}
+    ]) {
+      const calls=[];
+      const plugin=await createAgentTaskNotify({...scenario.options,spawn(exe,args,options){
+        const call={exe,args,options};calls.push(call);return completedChild(input=>call.input=JSON.parse(input));
+      }})({...scenario.context,client:{session:{async get(){return {data:{id:'root'}}}}}});
+      await plugin.event({event:{type:'message.updated',properties:{info:{sessionID:'root',id:'u',role:'user',text:'PRIVATE'}}}});
+      await plugin.event({event:{type:'session.idle',properties:{sessionID:'root'}}});
+      assert.equal(calls.length,2);
+      for (const call of calls) {
+        assert.equal(call.exe,scenario.exe);
+        assert.deepEqual(call.args,['hook','--agent','opencode',...(scenario.data?['--data-directory',scenario.data]:[])]);
+        assert.equal(call.options.shell,false);assert.equal(call.options.windowsHide,true);
+        assert.deepEqual(call.options.stdio,['pipe','ignore','ignore']);
+        assert.ok(!JSON.stringify(call).includes('PRIVATE'));
+      }
+      assert.deepEqual(calls.map(c=>c.input.event),['started','stopped']);
+    }
+    delete process.env.ATN_DATA_DIRECTORY;
+    let args;
+    const plugin=await createAgentTaskNotify({executable,spawn(exe,a){args=a;return completedChild(()=>{})}})({client:{session:{async get(){return {data:{}}}}}});
+    await plugin.event({event:{type:'message.updated',properties:{info:{sessionID:'root',id:'u',role:'user'}}}});
+    assert.deepEqual(args,['hook','--agent','opencode']);
+  } finally {if(previous===undefined)delete process.env.ATN_DATA_DIRECTORY;else process.env.ATN_DATA_DIRECTORY=previous;}
+});
+
+test('invalid explicit native values never fall back to context or legacy',async()=>{
+  const {createAgentTaskNotify}=await import('../integrations/opencode/bridge.mjs');
+  for (const invalid of [undefined,null,'',42,{},'relative-notifier','bad\0name']) {
+    for (const source of ['options','context']) {
+      const codes=[];let calls=0;
+      const options={diagnostic:code=>codes.push(code),spawn(){calls++;return completedChild(()=>{})}};
+      const context={client:{session:{async get(){return {data:{}}}}}};
+      if(source==='options'){options.executable=invalid;context.agentTaskNotifyExecutable=process.execPath;}
+      else context.agentTaskNotifyExecutable=invalid;
+      const plugin=await createAgentTaskNotify(options)(context);
+      const event={event:{type:'message.updated',properties:{info:{sessionID:'root',id:'u',role:'user'}}}};
+      await plugin.event(event);await plugin.event(event);
+      assert.equal(calls,0);assert.deepEqual(codes,['bridge-native-unavailable']);
+    }
+  }
 });
