@@ -5,6 +5,7 @@
   "assets/embed.go",
   "cmd/agent-task-notify/main.go",
   "cmd/package-native/main.go",
+  "cmd/package-native/main_test.go",
   "internal/cli/app.go",
   "internal/cli/app_test.go",
   "internal/cli/commands.go",

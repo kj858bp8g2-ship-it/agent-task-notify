@@ -40,7 +40,7 @@ agent-task-notify install --agent codex --command-shell cmd --data-directory ABS
 
 Windows 示例仅适合确实使用 cmd 的宿主；只有验证相应宿主 shell 后才能选 `powershell` 或 `posix`。Mac 使用显式 `--command-shell posix`。不要把当前交互终端等同宿主 shell。`--config-path ABS_FILE` 可指定明确核实的配置：默认分别为用户 HOME 下 `.codex/hooks.json`、`.claude/settings.json`、`.cursor/hooks.json`、`.gemini/settings.json`；OpenCode 的 `$XDG_CONFIG_HOME/opencode/opencode.json` 或 `$HOME/.config/opencode/opencode.json` 仅为定位器，实际只写同级 `plugins/agent-task-notify.js`。宿主目标父目录（包括 OpenCode plugins）须已存在且用户自有，安装器不会创建或修复宿主目录。缺失时先停止，核实宿主位置后在本地明确创建/验证，不以提权或修改权限绕过。已有空白、空内容或损坏 JSON 不会被替换，须显式处理。检查打印的目标/计划，获得授权后才用 `--apply`。保留未知字段、其它 Hook 及 JSON 数字原始表示；受保护备份和收据是前提，冲突停止。宿主配置上限 4 MiB、加密封套 6 MiB。两秒锁限制只针对获取锁的等待，不是 OS 调用或整个安装的硬超时；前台 Vault 授权先于锁。Codex 原 `notify` 不覆盖，宿主信任/审批由用户完成。导入 Skill **不代表**后台 Hook 已启用；收据也不能证明没有其他插件路线或宿主已经加载。
 
-OpenCode 在自身运行时加载 JS bridge，再直接启动原生程序。保留根程序旁的 `integrations/opencode`；原生安装器生成含显式程序/数据路径的 shim。不能直接导入旧默认 wrapper 替代原生安装。旧 PowerShell/plugin 路线保持独立，不与原生路线双重注册。本候选不升级现用安装、不读取旧设备密钥；旧源码脚本保持不变。
+OpenCode 在自身运行时加载 JS bridge，再直接启动原生程序。保留根程序旁的 `integrations/opencode`；原生安装器生成含显式程序/数据路径的 shim。不能直接导入旧默认 wrapper 替代原生安装。旧 PowerShell/plugin 路线保持独立，不与原生路线双重注册。本候选保持用户现用安装不变，不自动升级、不读取旧设备密钥。独立的旧版源码路线包含已窄范围验证的 worker 启动锁修正，不代表所有历史计时失败都已确定原因。
 
 ## WorkBuddy 手动实验包
 
@@ -50,7 +50,7 @@ OpenCode 在自身运行时加载 JS bridge，再直接启动原生程序。保�
 
 支持的任务开始事件启动计时；重复开始不重置，重复结束不创建第二份主任务。默认可调设置为 `minSeconds: 1800`、`longTaskSeconds: 3600`、`mediumRingSeconds: 45`、`longRingSeconds: 60`、`continuous: true`、`level: critical`、`volume: 7`、`sound: alarm`、`ntfyPriority: 4`、`enableAttention: false`、`icons: {}`。阈值须正数且有序，铃声目标 30–60 秒、音量 0–10、优先级 1–5。本地 JSON 补丁如 `{"minSeconds":300,"longTaskSeconds":1200,"sound":"alarm"}` 通过 configure 的 `--settings-file` 提供，凭据仍在本地输入，不编辑程序内嵌默认值。Bark 连续模式由主通知和一次续响组成，手机历史可能显示两条；45/60 秒只是近似目标，不保证实际响铃长度。普通单次由声音本身决定。ntfy 声音由手机控制，不发送 Call/X-Call 或 Bark 专属声音字段；都不是真实电话。
 
-六种图标分别对应 Codex/ChatGPT、Claude Code/Claude、Cursor、Gemini CLI/Gemini、OpenCode、WorkBuddy，内嵌的是远程图标元数据。它们仅装饰通知，不替换应用或系统小图标；远程图片可变化，引用不授予品牌许可。`icons` 可按 ID 指定 HTTPS 图片或用空字符串省略。每个任务创建时冻结设置和图标。没有额外遥测；选定服务必然收到其凭据及通用通知内容，不含任务正文、路径或原生 ID。本地加密不等于推送端到端加密。
+六种图标分别对应 Codex/ChatGPT、Claude Code/Claude、Cursor、Gemini CLI/Gemini、OpenCode、WorkBuddy，内嵌的是远程图标元数据。它们仅装饰通知，不替换应用或系统小图标；远程图片可变化，引用不授予品牌许可。`icons` 仅可按六个已知 ID 指定 HTTPS 图片，空字符串或无效图片地址会省略。`sound` 值及每个独立图标覆盖值均最多 4096 UTF-8 字节。每个任务创建时冻结设置和图标。没有额外遥测；选定服务必然收到其凭据及通用通知内容，不含任务正文、路径或原生 ID。本地加密不等于推送端到端加密。
 
 当前适配器不保证覆盖所有 `needs_attention`，没有原生 run ID 的来源无法完全消除延迟 Stop 歧义。仅明确可重试错误最多五次主发送、间隔 5/15/30/60 秒，续响只发送一次。无离线、常驻服务、重启恢复、恰好一次或手机送达保证；state → job → spawn 有崩溃缺口，不确定发送不重放，最后检查也可能与新事件竞态。240 秒 worker context 是协作预算，不是硬 OS 杀进程/进程树约束。
 

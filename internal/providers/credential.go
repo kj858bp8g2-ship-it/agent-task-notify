@@ -78,7 +78,7 @@ func ValidateCredential(provider string, credential Credential) error {
 		return errCredential
 	}
 	if provider == "ntfy" {
-		if len(credential.Token) > maxCredentialBytes || strings.ContainsAny(credential.Token, "\r\n") || (strings.TrimSpace(credential.Token) == "" && !credential.AllowUnauthenticated) {
+		if len(credential.Token) > maxCredentialBytes || strings.ContainsAny(credential.Token, "\r\n") || (credential.Token != "" && strings.TrimSpace(credential.Token) == "") || (credential.Token == "" && !credential.AllowUnauthenticated) {
 			return errCredential
 		}
 	}

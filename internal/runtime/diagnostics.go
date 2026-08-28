@@ -49,8 +49,26 @@ func countDiagnostic(d *Diagnostic, text string) {
 // Enumeration is bounded before reading entries, not after an unbounded ReadDir.
 // Invalid names consume the same budget. At most 1001 are seen, 1000 visited.
 func (r *Runtime) walkRecords(ctx context.Context, visit func(dir, key string)) (bool, error) {
-	seen := 0
-	for _, dir := range []string{"sessions", "runs", "jobs"} {
+	return r.walkRecordCategories(ctx, []string{"sessions", "runs", "jobs"}, visit)
+}
+
+func (r *Runtime) walkRecordCategories(ctx context.Context, dirs []string, visit func(dir, key string)) (bool, error) {
+	type category struct {
+		dir  string
+		file *os.File
+	}
+	var categories []category
+	defer func() {
+		for _, c := range categories {
+			if c.file != nil {
+				c.file.Close()
+			}
+		}
+	}()
+	for _, dir := range dirs {
+		if ctx.Err() != nil {
+			return false, errUnavailable
+		}
 		path := filepath.Join(r.Repository.Directory(), dir)
 		if _, err := os.Lstat(path); os.IsNotExist(err) {
 			continue
@@ -62,33 +80,43 @@ func (r *Runtime) walkRecords(ctx context.Context, visit func(dir, key string)) 
 		if err != nil {
 			return false, errUnavailable
 		}
-		for {
+		categories = append(categories, category{dir, f})
+	}
+	seen, open := 0, len(categories)
+	// Small round-robin reads give every existing category an opportunity even
+	// when another category is much larger than the total operation budget.
+	for open > 0 {
+		for i := range categories {
+			c := &categories[i]
+			if c.file == nil {
+				continue
+			}
 			if ctx.Err() != nil {
-				f.Close()
 				return false, errUnavailable
 			}
-			entries, readErr := f.ReadDir(min(64, 1001-seen))
+			entries, readErr := c.file.ReadDir(min(32, 1001-seen))
 			for _, entry := range entries {
 				seen++
 				if seen > 1000 {
-					f.Close()
 					return true, nil
+				}
+				if ctx.Err() != nil {
+					return false, errUnavailable
 				}
 				key := strings.TrimSuffix(entry.Name(), ".json")
 				if !strings.HasSuffix(entry.Name(), ".json") || !core.ValidKey(key) || !entry.Type().IsRegular() {
 					key = ""
 				}
-				visit(dir, key)
+				visit(c.dir, key)
 			}
 			if readErr == io.EOF {
-				break
-			}
-			if readErr != nil {
-				f.Close()
+				c.file.Close()
+				c.file = nil
+				open--
+			} else if readErr != nil {
 				return false, errUnavailable
 			}
 		}
-		f.Close()
 	}
 	return false, nil
 }
@@ -236,7 +264,7 @@ func (r *Runtime) cleanup(parent context.Context) {
 	ctx, cancel := context.WithTimeout(parent, time.Second)
 	defer cancel()
 	now := r.Now()
-	_, _ = r.walkRecords(ctx, func(dir, key string) {
+	_, _ = r.walkRecordCategories(ctx, []string{"runs", "jobs"}, func(dir, key string) {
 		if key == "" || ctx.Err() != nil {
 			return
 		}

@@ -28,7 +28,7 @@ Use `--settings-file ABS_JSON` for a strict UTF-8 JSON object patch (4 MiB input
 | `sound` | `alarm` | Nonblank UTF-8 string, at most 4096 bytes |
 | `ntfyPriority` | 4 | Integer 1–5; phone app controls actual sound |
 | `enableAttention` | false | Reserved normalized attention integration; no adapter guarantees it |
-| `icons` | `{}` | Six known ID keys; HTTPS artwork, empty/invalid artwork omitted |
+| `icons` | `{}` | Six known ID keys; each override at most 4096 UTF-8 bytes; HTTPS artwork, empty/invalid artwork omitted |
 
 IDs are `codex`, `claude-code`, `cursor`, `gemini-cli`, `opencode`, `workbuddy`. Embedded metadata supplies their own icons; overrides do not replace the application/system small icon. Remote art may change and grants no brand license. Settings and resolved icon are frozen per job, including retries and extension. Continuous Bark can create two visible phone notifications; single mode follows the sound itself. ntfy sends no Call/X-Call or Bark-only sound fields. Neither channel is a telephone call or promises exact audible timing.
 

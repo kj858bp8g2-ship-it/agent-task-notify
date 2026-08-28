@@ -234,16 +234,10 @@ func mergeJSON(agent string, data []byte, exists bool, previous, desired []owned
 	}
 	for event, values := range arrays {
 		if len(values) == 0 {
-			removed := false
-			for _, entry := range previous {
-				if entry.Event == event {
-					removed = true
-				}
-			}
-			if removed {
-				delete(hooks, event)
-				continue
-			}
+			// Receipts do not record whether an empty event container existed
+			// before installation. Conservatively retain it, always as [] rather
+			// than null, and remove only the receipt-confirmed entry.
+			values = []json.RawMessage{}
 		}
 		hooks[event], _ = json.Marshal(values)
 	}

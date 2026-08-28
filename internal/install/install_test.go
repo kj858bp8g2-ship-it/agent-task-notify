@@ -321,6 +321,39 @@ func assertOriginalBackup(t *testing.T, f fixture, original []byte, existed bool
 	return path
 }
 
+func TestUninstallPreservesEmptyEventArrays(t *testing.T) {
+	requireProtection(t)
+	for _, original := range []string{`{"version":1,"hooks":{"stop":[]}}`, `{"version":1,"hooks":{}}`} {
+		t.Run(original, func(t *testing.T) {
+			f := setup(t, "cursor", []byte(original))
+			installFixture(t, f)
+			plan, err := PlanUninstall(context.Background(), f.repo, "cursor")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ApplyUninstall(context.Background(), f.repo, plan); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(f.options.ConfigPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var result struct {
+				Version int                        `json:"version"`
+				Hooks   map[string]json.RawMessage `json:"hooks"`
+			}
+			if err := json.Unmarshal(data, &result); err != nil || result.Version != 1 {
+				t.Fatal("uninstall changed host object", err)
+			}
+			for _, event := range []string{"stop", "beforeSubmitPrompt"} {
+				if string(result.Hooks[event]) != "[]" {
+					t.Errorf("uninstall lost empty event array %s: %s", event, result.Hooks[event])
+				}
+			}
+		})
+	}
+}
+
 func TestInstallReinstallUninstallPreservesExternalStateAndBackup(t *testing.T) {
 	requireProtection(t)
 	for _, agent := range []string{"codex", "claude-code", "cursor", "gemini-cli", "opencode"} {

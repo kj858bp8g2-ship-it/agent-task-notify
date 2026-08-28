@@ -612,3 +612,103 @@ func TestRetentionBoundariesAndReadOnlyInspection(t *testing.T) {
 		t.Fatal("active/ambiguous lost")
 	}
 }
+
+func fillInvalidRecords(t *testing.T, r *Runtime, dir string, count int) {
+	t.Helper()
+	path := filepath.Join(r.Repository.Directory(), dir)
+	if err := store.EnsurePrivateDirectory(path); err != nil {
+		t.Fatal(err)
+	}
+	for i := range count {
+		name := core.Key("invalid", string(rune(i))) + ".txt"
+		if err := os.WriteFile(filepath.Join(path, name), nil, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestRecordTraversalFairnessCapAndCancellation(t *testing.T) {
+	r := fixture(t)
+	if err := r.Repository.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	for _, dir := range []string{"sessions", "runs", "jobs"} {
+		fillInvalidRecords(t, r, dir, 1001)
+	}
+	visits := make(map[string]int)
+	truncated, err := r.walkRecords(context.Background(), func(dir, _ string) { visits[dir]++ })
+	if err != nil || !truncated || visits["sessions"]+visits["runs"]+visits["jobs"] != 1000 {
+		t.Fatalf("scan budget/truncation: %v %v %v", visits, truncated, err)
+	}
+	for _, dir := range []string{"sessions", "runs", "jobs"} {
+		if visits[dir] == 0 {
+			t.Errorf("crowded category starved %s", dir)
+		}
+	}
+	visits = make(map[string]int)
+	truncated, err = r.walkRecordCategories(context.Background(), []string{"runs", "jobs"}, func(dir, _ string) { visits[dir]++ })
+	if err != nil || !truncated || visits["sessions"] != 0 || visits["runs"] == 0 || visits["jobs"] == 0 || visits["runs"]+visits["jobs"] != 1000 {
+		t.Fatalf("cleanup category fairness/cap: %v %v %v", visits, truncated, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	visited := 0
+	if _, err := r.walkRecords(ctx, func(_, _ string) { visited++ }); err == nil || visited != 0 {
+		t.Fatal("canceled enumeration visited records")
+	}
+}
+
+func TestRecordTraversalExactCapIsNotTruncated(t *testing.T) {
+	r := fixture(t)
+	if err := r.Repository.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	fillInvalidRecords(t, r, "sessions", 1000)
+	visits := 0
+	truncated, err := r.walkRecords(context.Background(), func(_, _ string) { visits++ })
+	if err != nil || truncated || visits != 1000 {
+		t.Fatalf("exact cap falsely truncated: visits=%d truncated=%v err=%v", visits, truncated, err)
+	}
+}
+
+func TestCleanupAndInspectReachRunsAndJobsPastSessionBacklog(t *testing.T) {
+	r := fixture(t)
+	e := core.Event{AgentID: "codex", SessionID: "expired", NativeRunID: "run", EventType: "started"}
+	eventAt(t, r, e, epoch)
+	e.EventType = "stopped"
+	got := eventAt(t, r, e, epoch.Add(time.Hour))
+	expiredRun := core.Key("codex", "expired", "run")
+	j := readJobTest(t, r, got.JobKey)
+	j.Status, j.Attempts, j.Accepted = "sent", 1, true
+	j.FinishedAt = stamp(epoch.Add(time.Hour))
+	j.ExtensionStatus = "none"
+	put(t, recordPath(r, "jobs", got.JobKey), j)
+	eventAt(t, r, core.Event{AgentID: "codex", SessionID: "active", NativeRunID: "run", EventType: "started"}, epoch)
+	s, _ := core.Defaults()
+	ambiguousKey := core.Key(core.Key("ambiguous"), "preview")
+	ambiguous := newJob(core.Key("ambiguous"), "preview", s, providers.Message{AgentID: "codex", Reason: "stopped", Preview: true}, 45, epoch)
+	ambiguous.Status, ambiguous.Attempts = "sending", 1
+	put(t, recordPath(r, "jobs", ambiguousKey), ambiguous)
+	fillInvalidRecords(t, r, "sessions", 1001)
+	r.Now = func() time.Time { return epoch.Add(9 * 24 * time.Hour) }
+	d, err := r.Inspect(context.Background())
+	if err != nil || !d.Truncated || d.ActiveRuns != 1 || d.SentJobs != 1 || d.AmbiguousJobs != 1 {
+		t.Errorf("Inspect starved later categories: %+v %v", d, err)
+	}
+	r.cleanup(context.Background())
+	for _, path := range []string{recordPath(r, "runs", expiredRun), recordPath(r, "jobs", got.JobKey)} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Error("session backlog starved expired run/job cleanup")
+		}
+	}
+	for _, path := range []string{
+		recordPath(r, "runs", core.Key("codex", "active", "run")),
+		recordPath(r, "jobs", ambiguousKey),
+		recordPath(r, "sessions", core.Key("codex", "expired")),
+		r.lockPath("session", core.Key("codex", "expired")),
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Error("active/ambiguous/session/lock record was removed")
+		}
+	}
+}

@@ -640,6 +640,7 @@ func TestNativeRuntimeRetryExtensionAndDuplicateStop(t *testing.T) {
 			var cleanup atomic.Bool
 			var mu sync.Mutex
 			var times []time.Time
+			var firstFailureAt time.Time
 			var bodies [][]byte
 			gate := make(chan struct{})
 			var gateOnce sync.Once
@@ -664,6 +665,9 @@ func TestNativeRuntimeRetryExtensionAndDuplicateStop(t *testing.T) {
 						w.WriteHeader(400)
 						return
 					}
+					mu.Lock()
+					firstFailureAt = time.Now()
+					mu.Unlock()
 					w.WriteHeader(503)
 					return
 				}
@@ -690,6 +694,7 @@ func TestNativeRuntimeRetryExtensionAndDuplicateStop(t *testing.T) {
 			}
 			mu.Lock()
 			gotTimes := append([]time.Time(nil), times...)
+			failedAt := firstFailureAt
 			gotBodies := append([][]byte(nil), bodies...)
 			mu.Unlock()
 			want := 3
@@ -699,8 +704,11 @@ func TestNativeRuntimeRetryExtensionAndDuplicateStop(t *testing.T) {
 			if len(gotTimes) != want {
 				t.Fatalf("request count=%d want=%d", len(gotTimes), want)
 			}
-			if delay := gotTimes[1].Sub(gotTimes[0]); delay < 5*time.Second || delay > 9*time.Second {
-				t.Fatalf("first retry delay=%v", delay)
+			if failedAt.IsZero() {
+				t.Fatal("first failure response timestamp missing")
+			}
+			if delay := gotTimes[1].Sub(failedAt); delay < 5*time.Second || delay > 9*time.Second {
+				t.Fatalf("first response-to-retry delay=%v", delay)
 			}
 			if provider == "bark" {
 				if delay := gotTimes[2].Sub(gotTimes[1]); delay < 900*time.Millisecond || delay > 4*time.Second {

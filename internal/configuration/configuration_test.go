@@ -591,6 +591,74 @@ func TestFailedFirstConfigurationKeepsStableIdentity(t *testing.T) {
 	}
 }
 
+func TestFirstValidConfigurationCommitFailureKeepsNewIdentity(t *testing.T) {
+	requireSyntheticProtection(t)
+	r := repositoryFixture(t)
+	if _, err := os.Lstat(r.Directory()); !os.IsNotExist(err) {
+		t.Fatal("first configure fixture already has state")
+	}
+	identityPath := filepath.Join(r.Directory(), "installation.json")
+	configurationPath := filepath.Join(r.Directory(), "configuration.json")
+	var createdIdentity []byte
+	opens := 0
+	opener := func(mode secrets.AccessMode) (*secrets.Vault, error) {
+		opens++
+		if mode != secrets.Foreground {
+			t.Fatal("first configure did not open foreground vault")
+		}
+		// Open the real Vault, creating the first identity/key. Only then create
+		// an actual test-owned destination conflict; crypto and WriteAtomic run.
+		vault, err := r.vaultLocked(mode)
+		if err != nil {
+			return nil, err
+		}
+		createdIdentity, err = store.ReadPrivate(identityPath, 1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.EnsurePrivateDirectory(configurationPath); err != nil {
+			t.Fatal(err)
+		}
+		return vault, nil
+	}
+	const patch = `{"minSeconds":123,"volume":8}`
+	if err := r.configure(context.Background(), "ntfy", ntfyFixture, []byte(patch), opener); err != errConfigurationUnavailable {
+		t.Fatal("valid first configure did not fail at the blocked commit", err)
+	}
+	if opens != 1 || len(createdIdentity) == 0 {
+		t.Fatal("first commit failure did not follow real vault creation")
+	}
+	if info, err := os.Lstat(configurationPath); err != nil || !info.IsDir() {
+		t.Fatal("failed commit replaced synthetic destination conflict")
+	}
+	if _, configured, err := r.View(); err == nil || configured {
+		t.Fatal("failed commit exposed a successful configuration")
+	}
+	if _, err := r.Credential("ntfy", secrets.Background); err == nil {
+		t.Fatal("failed commit exposed protected credential")
+	}
+	if after, err := store.ReadPrivate(identityPath, 1024); err != nil || !bytes.Equal(createdIdentity, after) {
+		t.Fatal("failed commit lost newly created identity")
+	}
+	// Remove only this empty synthetic directory, never user data or a tree.
+	if err := os.Remove(configurationPath); err != nil {
+		t.Fatal(err)
+	}
+	if settings, configured, err := r.View(); err != nil || configured || settings.MinSeconds != 1800 || settings.Volume != 7 {
+		t.Fatal("failed commit persisted settings")
+	}
+	save(t, r, "ntfy", ntfyFixture, patch)
+	if after, err := store.ReadPrivate(identityPath, 1024); err != nil || !bytes.Equal(createdIdentity, after) {
+		t.Fatal("valid retry replaced newly created identity")
+	}
+	if got, err := r.Credential("ntfy", secrets.Background); err != nil || got != ntfyFixture {
+		t.Fatal("valid retry did not retain readable protected credential")
+	}
+	if settings, err := r.Settings(); err != nil || settings.Provider != "ntfy" || settings.MinSeconds != 123 || settings.Volume != 8 {
+		t.Fatal("valid retry did not persist settings")
+	}
+}
+
 func TestConfigurationErrorsAreFixedAndReadsDoNotCreate(t *testing.T) {
 	requireSyntheticProtection(t)
 	r := repositoryFixture(t)

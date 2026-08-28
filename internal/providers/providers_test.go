@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/kj858bp8g2-ship-it/agent-task-notify/internal/core"
 	"github.com/kj858bp8g2-ship-it/agent-task-notify/internal/providers"
@@ -259,5 +261,116 @@ func TestResponsesRedirectOversizeTransportAndCancellation(t *testing.T) {
 	r = providers.Send(ctx, defaults(t, "bark"), providers.Credential{Endpoint: "http://" + addr + "/key"}, providers.Message{AgentID: "codex"})
 	if r.Accepted || r.Retryable || r.Diagnostic != "transport" {
 		t.Fatalf("canceled %+v", r)
+	}
+}
+
+func TestNtfyTokenWhitespaceAndConsent(t *testing.T) {
+	for _, consent := range []bool{false, true} {
+		for _, token := range []string{" ", "\t", " \t ", "\u2003"} {
+			credential := providers.Credential{Endpoint: "https://example.test/topic", Token: token, AllowUnauthenticated: consent}
+			if err := providers.ValidateCredential("ntfy", credential); err == nil {
+				t.Errorf("accepted nonempty whitespace token with consent=%v", consent)
+			}
+		}
+		for _, token := range []string{"", "synthetic", " synthetic token "} {
+			input := providers.Credential{Endpoint: "https://example.test/topic", Token: token, AllowUnauthenticated: consent}
+			raw, err := json.Marshal(input)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := providers.ParseCredential("ntfy", raw)
+			if token == "" && !consent {
+				if err == nil {
+					t.Error("accepted anonymous credential without consent")
+				}
+			} else if err != nil || got != input {
+				t.Errorf("valid token bytes/consent not preserved: %v", err)
+			}
+		}
+	}
+}
+
+type observedTransport struct {
+	base http.RoundTripper
+	read chan struct{}
+}
+
+func (tr observedTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	response, err := tr.base.RoundTrip(r)
+	if err == nil {
+		response.Body = &observedBody{ReadCloser: response.Body, read: tr.read}
+	}
+	return response, err
+}
+
+type observedBody struct {
+	io.ReadCloser
+	read chan struct{}
+	once sync.Once
+}
+
+func (b *observedBody) Read(p []byte) (int, error) {
+	b.once.Do(func() { close(b.read) })
+	return b.ReadCloser.Read(p)
+}
+
+func TestParentCancellationDuringSuccessBodyRead(t *testing.T) {
+	// Observe the real network body Read, not merely header arrival: canceling
+	// before client.Do returns would miss the production branch under test.
+	reading := make(chan struct{})
+	original := http.DefaultTransport
+	transport := original.(*http.Transport).Clone()
+	http.DefaultTransport = observedTransport{base: transport, read: reading}
+	defer func() {
+		http.DefaultTransport = original
+		transport.CloseIdleConnections()
+	}()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	s := defaults(t, "bark")
+	result := make(chan providers.Result, 1)
+	go func() {
+		result <- providers.Send(ctx, s, providers.Credential{Endpoint: server.URL + "/key"}, providers.Message{AgentID: "codex"})
+	}()
+	select {
+	case <-reading:
+	case <-time.After(3 * time.Second):
+		t.Fatal("response body read was not reached")
+	}
+	cancel()
+	select {
+	case got := <-result:
+		if got.Accepted || got.Retryable || got.Diagnostic != "transport" {
+			t.Fatalf("parent cancellation during body read: %+v", got)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("canceled body read did not return")
+	}
+}
+
+func TestSuccessBodyReadErrorsWithUncanceledParent(t *testing.T) {
+	for _, name := range []string{"truncated", "client-timeout"} {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Length", "100")
+				w.WriteHeader(http.StatusOK)
+				w.(http.Flusher).Flush()
+				if name == "client-timeout" {
+					<-r.Context().Done()
+				}
+			}))
+			defer server.Close()
+			ctx := context.Background()
+			got := providers.Send(ctx, defaults(t, "bark"), providers.Credential{Endpoint: server.URL + "/key"}, providers.Message{AgentID: "codex"})
+			if ctx.Err() != nil || got.Accepted || !got.Retryable || got.Diagnostic != "malformed-response" {
+				t.Fatalf("uncanceled parent body error: %+v", got)
+			}
+		})
 	}
 }

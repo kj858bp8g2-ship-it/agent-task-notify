@@ -59,6 +59,9 @@ func Send(ctx context.Context, settings core.Settings, credential Credential, me
 		return Result{Retryable: retryableStatus(int64(response.StatusCode)), Diagnostic: statusDiagnostic(response.StatusCode)}
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes))
+	if err != nil && ctx.Err() != nil {
+		return Result{Diagnostic: "transport"}
+	}
 	if err != nil || len(body) > maxResponseBytes-1 {
 		return Result{Retryable: true, Diagnostic: "malformed-response"}
 	}

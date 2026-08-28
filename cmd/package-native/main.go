@@ -37,6 +37,7 @@ const candidateVersion = "0.2.0-rc.1"
 const binaryLimit = 100 * 1024 * 1024
 const textLimit = 1024 * 1024
 const archiveLimit = 220 * 1024 * 1024
+const expandedArchiveLimit = 221 * 1024 * 1024
 const unsignedNotice = "UNSIGNED CANDIDATE — experimental CI test artifact only.\nNot signed or notarized for end-user distribution. Stop if macOS blocks execution; do not bypass Gatekeeper or remove quarantine.\nRead packaged INSTALL.md or INSTALL.zh-CN.md for the explicit experimental setup and evidence boundaries.\n"
 
 var errPackage = errors.New("native package rejected")
@@ -351,7 +352,42 @@ func encodeArchive(entries []entry, platform string) ([]byte, error) {
 	return out.Bytes(), nil
 }
 
+// expandedReader bounds bytes delivered to tar, including metadata consumed
+// inside Next. At the boundary a one-byte probe distinguishes genuine gzip EOF
+// (which validates the trailer) from limit exhaustion, never a successful EOF.
+type expandedReader struct {
+	r         io.Reader
+	remaining int64
+}
+
+func (r *expandedReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.remaining == 0 {
+		var probe [1]byte
+		n, err := r.r.Read(probe[:])
+		if n != 0 {
+			return 0, errPackage
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining {
+		p = p[:r.remaining]
+	}
+	n, err := r.r.Read(p)
+	r.remaining -= int64(n)
+	return n, err
+}
+
 func decodeArchive(data []byte, platform string) ([]entry, error) {
+	return decodeArchiveWithExpandedLimit(data, platform, expandedArchiveLimit)
+}
+
+func decodeArchiveWithExpandedLimit(data []byte, platform string, limit int64) ([]entry, error) {
+	if limit < 0 {
+		return nil, errPackage
+	}
 	want := inventory(platform)
 	found := make(map[string]entry)
 	add := func(name string, mode os.FileMode, size int64, r io.Reader) error {
@@ -396,7 +432,8 @@ func decodeArchive(data []byte, platform string) ([]entry, error) {
 		}
 		defer gz.Close()
 		gz.Multistream(false)
-		r := tar.NewReader(gz)
+		expanded := &expandedReader{r: gz, remaining: limit}
+		r := tar.NewReader(expanded)
 		for {
 			h, err := r.Next()
 			if err == io.EOF {
@@ -409,7 +446,7 @@ func decodeArchive(data []byte, platform string) ([]entry, error) {
 				return nil, errPackage
 			}
 		}
-		rest, err := io.ReadAll(io.LimitReader(gz, 1))
+		rest, err := io.ReadAll(io.LimitReader(expanded, 1))
 		if err != nil || len(rest) != 0 || input.Len() != 0 {
 			return nil, errPackage
 		}
