@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"testing"
@@ -33,6 +34,7 @@ type packageEntry struct {
 // Removing any safety gate, leaking extra source files, or running the source
 // binary instead of the archived executable must fail these black-box checks.
 func TestNativePackage(t *testing.T) {
+	t.Setenv("ATN_PACKAGE_DIAGNOSTICS", "")
 	root, err := filepath.Abs("..")
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +159,135 @@ func TestNativePackage(t *testing.T) {
 	}
 	packageRun(t, tool, false, verifyArgs...)
 	packageRun(t, tool, false, args...)
+	t.Run("diagnostics", func(t *testing.T) {
+		run := func(t *testing.T, success bool, arguments ...string) (string, string) {
+			t.Helper()
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			cmd := exec.CommandContext(ctx, tool, arguments...)
+			var stdout, stderr bytes.Buffer
+			cmd.Stdout, cmd.Stderr = &stdout, &stderr
+			err := cmd.Run()
+			if success {
+				if err != nil {
+					t.Fatalf("diagnostic success: %v %q", err, stderr.String())
+				}
+			} else if exit, ok := err.(*exec.ExitError); !ok || exit.ExitCode() != 1 || stdout.Len() != 0 {
+				t.Fatalf("diagnostic refusal: %v stdout=%q", err, stdout.String())
+			}
+			return stdout.String(), stderr.String()
+		}
+		for _, value := range []string{"unset", "", "0", "true", " 1", "1 ", "SENSITIVE", "1"} {
+			t.Run("switch-"+value, func(t *testing.T) {
+				t.Setenv("ATN_PACKAGE_DIAGNOSTICS", value)
+				if value == "unset" {
+					if err := os.Unsetenv("ATN_PACKAGE_DIAGNOSTICS"); err != nil {
+						t.Fatal(err)
+					}
+				}
+				_, stderr := run(t, false, "verify", "--SENSITIVE")
+				want := "native package rejected\n"
+				if value == "1" {
+					want = "native package stage: arguments\n" + want
+				}
+				if stderr != want {
+					t.Fatalf("diagnostic switch stderr=%q want=%q", stderr, want)
+				}
+			})
+		}
+		t.Setenv("ATN_PACKAGE_DIAGNOSTICS", "1")
+		t.Run("build-unchanged", func(t *testing.T) {
+			_, stderr := run(t, false, "build", "--SENSITIVE")
+			if stderr != "native package rejected\n" {
+				t.Fatalf("build emitted diagnostic: %q", stderr)
+			}
+			buildArgs := append([]string(nil), args...)
+			buildArgs[len(buildArgs)-1] = filepath.Join(t.TempDir(), "new-build")
+			stdout, stderr := run(t, true, buildArgs...)
+			if stdout != "built "+name+"\n" || stderr != "" {
+				t.Fatalf("build behavior changed: %q %q", stdout, stderr)
+			}
+		})
+		prefix := "native package stage: arguments\nnative package stage: target\nnative package stage: archive-read\nnative package stage: checksums-read\nnative package stage: checksum\n"
+		for _, kind := range []string{"archive-read", "checksums-read", "checksum", "archive-decode", "content", "extract", "success"} {
+			t.Run(kind, func(t *testing.T) {
+				v := append([]string(nil), verifyArgs...)
+				v[len(v)-1] = filepath.Join(t.TempDir(), "SENSITIVE new-extract")
+				want := prefix
+				switch kind {
+				case "archive-read":
+					v[2] = filepath.Join(t.TempDir(), name)
+					want = "native package stage: arguments\nnative package stage: target\nnative package stage: archive-read\n"
+				case "checksums-read":
+					v[4] = filepath.Join(t.TempDir(), "SENSITIVE-missing")
+					want = strings.TrimSuffix(prefix, "native package stage: checksum\n")
+				case "checksum":
+					v[4] = filepath.Join(t.TempDir(), "SENSITIVE-checksums")
+					if os.WriteFile(v[4], []byte("SENSITIVE invalid checksum"), 0600) != nil {
+						t.Fatal("diagnostic checksum fixture")
+					}
+				case "archive-decode", "content":
+					changed := append([]packageEntry(nil), entries...)
+					for i := range changed {
+						if changed[i].name == "manifest.json" {
+							changed[i].data = []byte(`{"SENSITIVE":"invalid manifest"}`)
+						}
+					}
+					data := packageWrite(t, changed, runtime.GOOS == "windows")
+					if kind == "archive-decode" {
+						data = []byte("SENSITIVE invalid archive")
+					}
+					sum := sha256.Sum256(data)
+					dir := t.TempDir()
+					v[2], v[4] = filepath.Join(dir, name), filepath.Join(dir, "SENSITIVE-checksums")
+					if os.WriteFile(v[2], data, 0600) != nil || os.WriteFile(v[4], []byte(hex.EncodeToString(sum[:])+"  "+name+"\n"), 0600) != nil {
+						t.Fatal("diagnostic content fixture")
+					}
+					want += "native package stage: archive-decode\n"
+					if kind == "content" {
+						want += "native package stage: content\n"
+					}
+				case "extract":
+					v[len(v)-1] = filepath.Clean(t.TempDir())
+					want += "native package stage: archive-decode\nnative package stage: content\nnative package stage: extract-root\nnative package stage: directory-parent\n"
+				}
+				stdout, stderr := run(t, kind == "success", v...)
+				if kind != "success" {
+					if stderr != want+"native package rejected\n" {
+						t.Fatalf("wrong refusal stage: %q", stderr)
+					}
+					if kind != "extract" {
+						assertPackageAbsent(t, v[len(v)-1])
+					}
+					return
+				}
+				if stdout != "verified agent-task-notify 0.2.0-rc.1 "+platform+" — doctor and six dry previews passed\n" {
+					t.Fatalf("diagnostic success output: %q", stdout)
+				}
+				allowed := strings.Fields("arguments target archive-read checksums-read checksum archive-decode content extract-root directory-parent directory-create extract-directory extract-write private-readback mode hostfile extract-recheck isolated-random isolated-root isolated-directory isolated-version isolated-version-output isolated-doctor isolated-doctor-output isolated-preview isolated-preview-output isolated-state final-recheck complete")
+				seen := map[string]int{}
+				lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
+				if len(lines) > 160 || !strings.HasPrefix(stderr, prefix) || !strings.HasSuffix(stderr, "native package stage: complete\n") {
+					t.Fatalf("missing or unbounded stage sequence: %q", stderr)
+				}
+				for _, line := range lines {
+					label, ok := strings.CutPrefix(line, "native package stage: ")
+					if !ok || !slices.Contains(allowed, label) {
+						t.Fatalf("unapproved diagnostic output: %q", line)
+					}
+					seen[label]++
+				}
+				for _, label := range allowed {
+					if seen[label] == 0 {
+						t.Fatalf("missing successful boundary %s", label)
+					}
+				}
+				if seen["isolated-preview"] != 6 || seen["isolated-preview-output"] != 6 {
+					t.Fatal("six preview boundaries missing")
+				}
+			})
+		}
+	})
 	// Reject an empty preexisting directory too, and do not change its contents.
 	t.Run("existing-empty", func(t *testing.T) {
 		v := append([]string(nil), verifyArgs...)

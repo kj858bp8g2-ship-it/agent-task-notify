@@ -54,6 +54,16 @@ type entry struct {
 	mode os.FileMode
 }
 
+// Only fixed call-site labels are emitted; no input, native error or child
+// output is projected. A label identifies the boundary about to be checked.
+type packageDiagnostics bool
+
+func (d packageDiagnostics) stage(label string) {
+	if d {
+		fmt.Fprintln(os.Stderr, "native package stage:", label)
+	}
+}
+
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, errPackage)
@@ -62,6 +72,8 @@ func main() {
 }
 
 func run(args []string) error {
+	diagnostics := packageDiagnostics(len(args) > 0 && args[0] == "verify" && os.Getenv("ATN_PACKAGE_DIAGNOSTICS") == "1")
+	diagnostics.stage("arguments")
 	if len(args) == 0 {
 		return errPackage
 	}
@@ -95,7 +107,7 @@ func run(args []string) error {
 	if args[0] == "build" {
 		return buildPackage(values)
 	}
-	return verifyPackage(values)
+	return verifyPackage(values, diagnostics)
 }
 
 func absolutePath(path string) bool {
@@ -270,7 +282,7 @@ func buildPackage(v map[string]string) error {
 	if err != nil {
 		return err
 	}
-	if err := newOwnedDirectory(v["--output"]); err != nil {
+	if err := newOwnedDirectory(v["--output"], false); err != nil {
 		return err
 	}
 	archive := filepath.Join(v["--output"], archiveName(platform))
@@ -420,35 +432,50 @@ func verifyContents(entries []entry, platform string) error {
 
 // Never repair an existing object. The store creates new objects with explicit
 // current-user ownership even when Windows defaults new objects to Administrators.
-func newOwnedDirectory(path string) error {
+func newOwnedDirectory(path string, diagnostics packageDiagnostics) error {
+	diagnostics.stage("directory-parent")
 	if !absolutePath(path) || store.CheckPrivateDirectoryParent(path) != nil {
 		return errPackage
 	}
+	diagnostics.stage("directory-create")
 	if store.EnsurePrivateDirectory(path) != nil {
 		return errPackage
 	}
 	return nil
 }
 
-func verifyPackage(v map[string]string) error {
+func verifyPackage(v map[string]string, diagnostics packageDiagnostics) error {
 	platform := v["--platform"]
+	diagnostics.stage("target")
 	if platform != runtime.GOOS+"-"+runtime.GOARCH || filepath.Base(v["--archive"]) != archiveName(platform) {
 		return errPackage
 	}
+	diagnostics.stage("archive-read")
 	data, err := readRegular(v["--archive"], archiveLimit)
 	if err != nil {
 		return err
 	}
+	diagnostics.stage("checksums-read")
 	sums, err := readRegular(v["--checksums"], textLimit)
-	if err != nil || string(sums) != digest(data)+"  "+archiveName(platform)+"\n" {
+	if err != nil {
 		return errPackage
 	}
+	diagnostics.stage("checksum")
+	if string(sums) != digest(data)+"  "+archiveName(platform)+"\n" {
+		return errPackage
+	}
+	diagnostics.stage("archive-decode")
 	entries, err := decodeArchive(data, platform)
-	if err != nil || verifyContents(entries, platform) != nil {
+	if err != nil {
+		return errPackage
+	}
+	diagnostics.stage("content")
+	if verifyContents(entries, platform) != nil {
 		return errPackage
 	}
 	root := v["--extract-to"]
-	if newOwnedDirectory(root) != nil {
+	diagnostics.stage("extract-root")
+	if newOwnedDirectory(root, diagnostics) != nil {
 		return errPackage
 	}
 	created := map[string]bool{root: true}
@@ -463,33 +490,43 @@ func verifyPackage(v map[string]string) error {
 			missing = append(missing, current)
 		}
 		for i := len(missing) - 1; i >= 0; i-- {
-			if newOwnedDirectory(missing[i]) != nil {
+			diagnostics.stage("extract-directory")
+			if newOwnedDirectory(missing[i], diagnostics) != nil {
 				return errPackage
 			}
 			created[missing[i]] = true
 		}
+		diagnostics.stage("extract-write")
 		if _, err := os.Lstat(path); !os.IsNotExist(err) || store.WriteAtomic(path, e.data) != nil {
 			return errPackage
 		}
+		diagnostics.stage("private-readback")
 		private, err := store.ReadPrivate(path, memberLimit(e.name, platform))
 		if err != nil || !bytes.Equal(private, e.data) {
 			return errPackage
 		}
 		// Darwin private data is strictly0600. Only after private readback may
 		// these new objects receive archive mode, then hostfile validates them.
-		if os.Chmod(path, e.mode) != nil || checkExtracted(path, e, platform) != nil {
+		diagnostics.stage("mode")
+		if os.Chmod(path, e.mode) != nil {
+			return errPackage
+		}
+		diagnostics.stage("hostfile")
+		if checkExtracted(path, e, platform) != nil {
 			return errPackage
 		}
 	}
 	// Recheck the entire exact list before any execution, including both binaries.
+	diagnostics.stage("extract-recheck")
 	for _, e := range entries {
 		if checkExtracted(filepath.Join(root, filepath.FromSlash(e.name)), e, platform) != nil {
 			return errPackage
 		}
 	}
-	if runIsolated(root, platform, entries) != nil {
+	if runIsolated(root, platform, entries, diagnostics) != nil {
 		return errPackage
 	}
+	diagnostics.stage("complete")
 	fmt.Println("verified agent-task-notify", candidateVersion, platform, "— doctor and six dry previews passed")
 	return nil
 }
@@ -517,13 +554,15 @@ func (b *boundedOutput) Write(p []byte) (int, error) {
 
 // This is isolation of normal CLI behavior, not a sandbox for hostile code.
 // Only version/doctor/dry previews run: no configure, install, send or Keychain.
-func runIsolated(root, platform string, entries []entry) error {
+func runIsolated(root, platform string, entries []entry, diagnostics packageDiagnostics) error {
 	var nonce [16]byte
+	diagnostics.stage("isolated-random")
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return errPackage
 	}
 	runRoot := filepath.Join(filepath.Dir(root), "atn-package-check-"+hex.EncodeToString(nonce[:]))
-	if newOwnedDirectory(runRoot) != nil {
+	diagnostics.stage("isolated-root")
+	if newOwnedDirectory(runRoot, diagnostics) != nil {
 		return errPackage
 	}
 	dirs := []string{"home", "profile", "app-data", "local-data", "xdg-config", "xdg-data", "tmp", "cwd"}
@@ -534,7 +573,8 @@ func runIsolated(root, platform string, entries []entry) error {
 		_ = os.Remove(runRoot)
 	}()
 	for _, d := range dirs {
-		if newOwnedDirectory(filepath.Join(runRoot, d)) != nil {
+		diagnostics.stage("isolated-directory")
+		if newOwnedDirectory(filepath.Join(runRoot, d), diagnostics) != nil {
 			return errPackage
 		}
 	}
@@ -561,10 +601,16 @@ func runIsolated(root, platform string, entries []entry) error {
 		}
 		return out.Bytes(), nil
 	}
+	diagnostics.stage("isolated-version")
 	version, err := run("version")
-	if err != nil || string(version) != "agent-task-notify "+candidateVersion+" "+strings.ReplaceAll(platform, "-", "/")+"\n" {
+	if err != nil {
 		return errPackage
 	}
+	diagnostics.stage("isolated-version-output")
+	if string(version) != "agent-task-notify "+candidateVersion+" "+strings.ReplaceAll(platform, "-", "/")+"\n" {
+		return errPackage
+	}
+	diagnostics.stage("isolated-doctor")
 	doctor, err := run("doctor", "--data-directory", filepath.Join(runRoot, "data"))
 	if err != nil {
 		return err
@@ -574,10 +620,12 @@ func runIsolated(root, platform string, entries []entry) error {
 		Configured    bool `json:"configured"`
 		InputErrors   int  `json:"inputErrors"`
 	}
+	diagnostics.stage("isolated-doctor-output")
 	if json.Unmarshal(doctor, &d) != nil || d.SchemaVersion != 1 || d.Configured || d.InputErrors != 0 {
 		return errPackage
 	}
 	for _, agent := range []string{"codex", "claude-code", "cursor", "gemini-cli", "opencode", "workbuddy"} {
+		diagnostics.stage("isolated-preview")
 		out, err := run("preview", "--agent", agent, "--data-directory", filepath.Join(runRoot, "data"))
 		if err != nil {
 			return err
@@ -588,10 +636,12 @@ func runIsolated(root, platform string, entries []entry) error {
 			Ring       int    `json:"ringTargetSeconds"`
 			Continuous bool   `json:"continuous"`
 		}
+		diagnostics.stage("isolated-preview-output")
 		if json.Unmarshal(out, &p) != nil || p.Provider != "bark" || p.Agent != agent || p.Ring != 45 || !p.Continuous {
 			return errPackage
 		}
 	}
+	diagnostics.stage("isolated-state")
 	children, err := os.ReadDir(runRoot)
 	if err != nil || len(children) != len(dirs) {
 		return errPackage
@@ -602,6 +652,7 @@ func runIsolated(root, platform string, entries []entry) error {
 			return errPackage
 		}
 	}
+	diagnostics.stage("final-recheck")
 	for _, e := range entries {
 		if checkExtracted(filepath.Join(root, filepath.FromSlash(e.name)), e, platform) != nil {
 			return errPackage

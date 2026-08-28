@@ -111,6 +111,8 @@ jobs:
           path: ${{ runner.temp }}/atn-canonical-download
       - name: Verify and run the downloaded canonical archive
         shell: pwsh
+        env:
+          ATN_PACKAGE_DIAGNOSTICS: ${{ runner.os == 'Windows' && '1' || '' }}
         run: |
           $download = Join-Path $env:RUNNER_TEMP 'atn-canonical-download'
           $extension = if ($env:RUNNER_OS -eq 'Windows') { '.zip' } else { '.tar.gz' }
