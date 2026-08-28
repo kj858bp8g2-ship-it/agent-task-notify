@@ -46,6 +46,60 @@ func repositoryFixture(t *testing.T) *Repository {
 	return r
 }
 
+func TestViewIsSyntacticAndReadOnly(t *testing.T) {
+	r := repositoryFixture(t)
+	s, configured, err := r.View()
+	if err != nil || configured || s.MinSeconds != 1800 {
+		t.Fatal("missing bundle view")
+	}
+	if _, err := os.Lstat(r.Directory()); !os.IsNotExist(err) {
+		t.Fatal("view created state")
+	}
+	if err := r.Prepare(); err != nil {
+		t.Fatal(err)
+	}
+	id := strings.Repeat("a", 32)
+	if err := store.WriteAtomic(filepath.Join(r.Directory(), "installation.json"), []byte(`{"schemaVersion":1,"installationId":"`+id+`"}`)); err != nil {
+		t.Fatal(err)
+	}
+	// Syntactically valid, intentionally unauthentic. No foreground key exists.
+	state := bundle{1, s, map[string]json.RawMessage{"bark": json.RawMessage(`{"schemaVersion":1,"backend":"dpapi","installationId":"` + id + `","purpose":"credential:bark","ciphertext":"AQ=="}`)}}
+	encoded, _ := json.Marshal(state)
+	path := filepath.Join(r.Directory(), "configuration.json")
+	if err := store.WriteAtomic(path, encoded); err != nil {
+		t.Fatal(err)
+	}
+	s, configured, err = r.View()
+	if err != nil || !configured || s.MinSeconds != 1800 {
+		t.Fatal("view authenticated envelope")
+	}
+	s.Icons["codex"] = "changed"
+	again, _, err := r.View()
+	if err != nil || again.Icons["codex"] == "changed" {
+		t.Fatal("view shares mutable settings")
+	}
+	t.Run("authenticated-methods-unchanged", func(t *testing.T) {
+		requireSyntheticProtection(t)
+		if _, err := r.Settings(); err == nil {
+			t.Fatal("authenticated Settings semantics changed")
+		}
+		if _, err := r.Credential("bark", secrets.Background); err == nil {
+			t.Fatal("authenticated Credential semantics changed")
+		}
+	})
+	if after, _ := os.ReadFile(path); !bytes.Equal(after, encoded) {
+		t.Fatal("read mutated bundle")
+	}
+	for _, bad := range []string{`{}`, strings.Replace(string(encoded), `"schemaVersion":1`, `"schemaVersion":2`, 1), strings.Replace(string(encoded), `"minSeconds":1800,`, "", 1), strings.Replace(string(encoded), `"ciphertext":"AQ=="`, `"ciphertext":null`, 1)} {
+		if err := store.WriteAtomic(path, []byte(bad)); err != nil {
+			t.Fatal(err)
+		}
+		if _, configured, err := r.View(); err == nil || configured {
+			t.Fatal("invalid bundle accepted")
+		}
+	}
+}
+
 // Any test that can create a macOS account must be inside the disposable CI
 // fixture. The CI script deletes the whole generated Keychain after the suite.
 func requireSyntheticProtection(t *testing.T) {

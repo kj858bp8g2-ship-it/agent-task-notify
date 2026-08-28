@@ -34,6 +34,18 @@ type installation struct {
 	InstallationID string `json:"installationId"`
 }
 
+// View reads settings and syntactic selected-envelope presence only. Configured
+// does not mean the platform key is unlocked or a notification was delivered.
+// It never opens a Vault, authenticates ciphertext, or mutates state.
+func (r *Repository) View() (settings core.Settings, configured bool, err error) {
+	state, found, err := r.readBundle()
+	if err != nil {
+		return core.Settings{}, false, err
+	}
+	_, present := state.Credentials[state.Settings.Provider]
+	return state.Settings, found && present, nil
+}
+
 func (r *Repository) Settings() (core.Settings, error) {
 	state, found, err := r.readBundle()
 	if err != nil {
