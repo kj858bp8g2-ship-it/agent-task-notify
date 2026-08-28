@@ -14,13 +14,25 @@ var ErrNotFound = errors.New("private state not found")
 // Its direct parent must exist; all ancestors must be link-free and owned by
 // the current user or trusted system principals. It never creates or repairs.
 func CheckPrivateDirectoryParent(path string) error {
-	if !safePath(path, true) {
-		return errPrivate
+	_, _, err := CheckPrivateDirectoryParentDiagnostic(path)
+	return err
+}
+
+// CheckPrivateDirectoryParentDiagnostic performs the same read-only check and
+// returns its first rejection's fixed labels, never paths or native errors.
+// Success has empty labels; rejection preserves the original errPrivate.
+func CheckPrivateDirectoryParentDiagnostic(path string) (stage, category string, err error) {
+	if failure := safePathFailure(path, true); failure != nil {
+		return failure.stage, failure.category, errPrivate
 	}
 	if _, err := os.Lstat(path); !os.IsNotExist(err) {
-		return errPrivate
+		category := "exists"
+		if err != nil {
+			category = nativeErrorCategory(err)
+		}
+		return "leaf-missing", category, errPrivate
 	}
-	return nil
+	return "", "", nil
 }
 
 // CheckPrivateDirectory only validates; it never creates or repairs metadata.

@@ -51,12 +51,22 @@ func nativeMkdir(path string) error {
 }
 
 func nativeReparse(path string) bool {
+	return nativeReparseFailure(path) != nil
+}
+
+func nativeReparseFailure(path string) *privateStateError {
 	name, err := windows.UTF16PtrFromString(path)
 	if err != nil {
-		return true
+		return &privateStateError{"reparse-path", "rejected"}
 	}
 	attrs, err := windows.GetFileAttributes(name)
-	return err != nil || attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0
+	if err != nil {
+		return &privateStateError{"reparse-query", nativeErrorCategory(err)}
+	}
+	if attrs&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return &privateStateError{"reparse-point", "rejected"}
+	}
+	return nil
 }
 
 func descriptorPrivate(sd *windows.SECURITY_DESCRIPTOR) bool {
@@ -112,25 +122,41 @@ func nativePrivate(path string, directory bool) bool {
 
 // System-owned ancestors are trusted, never accepted as private state leaves.
 func nativeTrustedAncestor(path string) bool {
+	return nativeTrustedAncestorFailure(path) == nil
+}
+
+func nativeTrustedAncestorFailure(path string) *privateStateError {
 	sd, err := windows.GetNamedSecurityInfo(path, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
-		return false
+		return &privateStateError{"owner-query", nativeErrorCategory(err)}
 	}
 	owner, _, err := sd.Owner()
-	if err != nil || owner == nil || !owner.IsValid() {
-		return false
+	if err != nil {
+		return &privateStateError{"owner-value", nativeErrorCategory(err)}
+	}
+	if owner == nil || !owner.IsValid() {
+		return &privateStateError{"owner-value", "rejected"}
 	}
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user.User.Sid == nil || !user.User.Sid.IsValid() {
-		return false
+	if err != nil {
+		return &privateStateError{"current-user-query", nativeErrorCategory(err)}
+	}
+	if user.User.Sid == nil || !user.User.Sid.IsValid() {
+		return &privateStateError{"current-user-value", "rejected"}
 	}
 	if trustedAncestorOwner(owner, user.User.Sid, nil) {
-		return true
+		return nil
 	}
 	// Resolve only this local OS service, not the All Services group or an
 	// account name derived from input. Resolution failure never grants access.
 	installer, _, _, err := windows.LookupSID("", `NT SERVICE\TrustedInstaller`)
-	return err == nil && trustedAncestorOwner(owner, user.User.Sid, installer)
+	if err != nil {
+		return &privateStateError{"installer-lookup", nativeErrorCategory(err)}
+	}
+	if !trustedAncestorOwner(owner, user.User.Sid, installer) {
+		return &privateStateError{"ancestor-owner", "rejected"}
+	}
+	return nil
 }
 
 // installer is nil or the SID resolved for the fixed local TrustedInstaller

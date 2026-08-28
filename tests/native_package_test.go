@@ -198,6 +198,66 @@ func TestNativePackage(t *testing.T) {
 			})
 		}
 		t.Setenv("ATN_PACKAGE_DIAGNOSTICS", "1")
+		t.Run("directory-parent", func(t *testing.T) {
+			// A missing detail, an unconditional projection, or a second
+			// mutating validation must fail through the actual command.
+			for _, operation := range []struct {
+				name string
+				args []string
+			}{{"build", args}, {"verify", verifyArgs}} {
+				t.Run(operation.name, func(t *testing.T) {
+					for _, kind := range []string{"existing-leaf", "missing-parent"} {
+						t.Run(kind, func(t *testing.T) {
+							for _, value := range []string{"unset", "", "0", "true", " 1", "1 ", "SENSITIVE", "1"} {
+								t.Run("switch-"+value, func(t *testing.T) {
+									t.Setenv("ATN_PACKAGE_DIAGNOSTICS", value)
+									if value == "unset" {
+										if err := os.Unsetenv("ATN_PACKAGE_DIAGNOSTICS"); err != nil {
+											t.Fatal(err)
+										}
+									}
+									dir := t.TempDir()
+									dest := filepath.Join(dir, "SENSITIVE output")
+									detail := "native package parent: stage=leaf-missing category=exists\n"
+									if kind == "existing-leaf" {
+										if os.Mkdir(dest, 0700) != nil || os.WriteFile(filepath.Join(dest, "keep"), []byte("SENSITIVE unchanged"), 0600) != nil {
+											t.Fatal("existing parent fixture")
+										}
+									} else {
+										dest = filepath.Join(dir, "SENSITIVE missing", "child")
+										detail = "native package parent: stage=ancestor-stat category=missing\n"
+									}
+									v := append([]string(nil), operation.args...)
+									v[len(v)-1] = dest
+									_, stderr := run(t, false, v...)
+									if value == "1" {
+										want := "native package stage: directory-parent\n" + detail + "native package rejected\n"
+										if !strings.HasSuffix(stderr, want) || strings.Count(stderr, "native package parent:") != 1 || strings.Contains(stderr, "directory-create") || strings.Contains(stderr, "SENSITIVE") {
+											t.Fatalf("wrong parent diagnostic: %q", stderr)
+										}
+									} else if stderr != "native package rejected\n" {
+										t.Fatalf("off parent diagnostic: %q", stderr)
+									}
+									children, err := os.ReadDir(dir)
+									if err != nil {
+										t.Fatal("parent fixture unreadable")
+									}
+									if kind == "existing-leaf" {
+										kept, err := os.ReadFile(filepath.Join(dest, "keep"))
+										inside, listErr := os.ReadDir(dest)
+										if len(children) != 1 || listErr != nil || len(inside) != 1 || err != nil || string(kept) != "SENSITIVE unchanged" {
+											t.Fatal("existing parent fixture changed")
+										}
+									} else if len(children) != 0 {
+										t.Fatal("diagnostic created a missing parent")
+									}
+								})
+							}
+						})
+					}
+				})
+			}
+		})
 		t.Run("build-off-default", func(t *testing.T) {
 			for _, value := range []string{"unset", "0"} {
 				t.Run(value, func(t *testing.T) {
@@ -280,6 +340,7 @@ func TestNativePackage(t *testing.T) {
 						want += sourceSteps + "native package stage: build-manifest\nnative package stage: build-archive-encode\nnative package stage: build-output-root\nnative package stage: directory-parent\n"
 						if kind == "output-parent" {
 							v[len(v)-1] = filepath.Clean(t.TempDir())
+							want += "native package parent: stage=leaf-missing category=exists\n"
 						} else {
 							want += "native package stage: directory-create\nnative package stage: build-archive-write\nnative package stage: build-checksums-write\nnative package stage: complete\n"
 						}
@@ -352,6 +413,7 @@ func TestNativePackage(t *testing.T) {
 				case "extract":
 					v[len(v)-1] = filepath.Clean(t.TempDir())
 					want += "native package stage: archive-decode\nnative package stage: content\nnative package stage: extract-root\nnative package stage: directory-parent\n"
+					want += "native package parent: stage=leaf-missing category=exists\n"
 				}
 				stdout, stderr := run(t, kind == "success", v...)
 				if kind != "success" {

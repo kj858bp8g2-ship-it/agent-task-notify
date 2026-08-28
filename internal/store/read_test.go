@@ -2,11 +2,93 @@ package store
 
 import (
 	"errors"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
+
+func assertParentDiagnostic(t *testing.T, path, wantStage, wantCategory string, wantErr error) {
+	t.Helper()
+	if err := CheckPrivateDirectoryParent(path); err != wantErr {
+		t.Fatal("legacy parent result changed")
+	}
+	stage, category, err := CheckPrivateDirectoryParentDiagnostic(path)
+	if err != wantErr || stage != wantStage || category != wantCategory {
+		t.Fatalf("parent diagnostic stage=%q category=%q err=%v", stage, category, err)
+	}
+	if err != nil {
+		if err.Error() != "private state unavailable" || errors.Unwrap(err) != nil {
+			t.Fatal("parent public error changed")
+		}
+		for _, format := range []string{"%v", "%+v", "%#v"} {
+			if strings.Contains(fmt.Sprintf(format, err), "SENSITIVE") {
+				t.Fatal("parent error retained an input")
+			}
+		}
+	}
+}
+
+func TestPrivateDirectoryParentDiagnosticPreservesChecks(t *testing.T) {
+	// Empty detail, altered sentinel identity, or changed missing-leaf/unsafe
+	// path behavior must fail without relying on the implementation's helpers.
+	dir := privateDir(t)
+	file := filepath.Join(dir, "SENSITIVE existing")
+	if err := WriteAtomic(file, []byte("SENSITIVE keep")); err != nil {
+		t.Fatal(err)
+	}
+	beforeDir, beforeFile := targetAccessSnapshot(t, dir), targetAccessSnapshot(t, file)
+	for _, tc := range []struct {
+		name, path, stage, category string
+		err                         error
+		safeMissing, safeExisting   bool
+	}{
+		{"missing-leaf", filepath.Join(dir, "SENSITIVE missing"), "", "", nil, true, false},
+		{"existing-directory", dir, "leaf-missing", "exists", errPrivate, true, true},
+		{"existing-file", file, "leaf-missing", "exists", errPrivate, true, true},
+		{"missing-parent", filepath.Join(dir, "SENSITIVE missing", "child"), "ancestor-stat", "missing", errPrivate, false, false},
+		{"relative", "SENSITIVE relative", "path", "rejected", errPrivate, false, false},
+		{"unclean", dir + string(os.PathSeparator) + "." + string(os.PathSeparator) + "SENSITIVE leaf", "path", "rejected", errPrivate, false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assertParentDiagnostic(t, tc.path, tc.stage, tc.category, tc.err)
+			if safePath(tc.path, true) != tc.safeMissing || safePath(tc.path, false) != tc.safeExisting {
+				t.Fatal("legacy path predicate changed")
+			}
+		})
+	}
+	children, err := os.ReadDir(dir)
+	kept, readErr := os.ReadFile(file)
+	if err != nil || len(children) != 1 || readErr != nil || string(kept) != "SENSITIVE keep" {
+		t.Fatal("parent diagnostic created or changed fixture data")
+	}
+	if targetAccessSnapshot(t, dir) != beforeDir || targetAccessSnapshot(t, file) != beforeFile {
+		t.Fatal("parent diagnostic changed access metadata")
+	}
+}
+
+func TestPrivateDirectoryParentDiagnosticDoesNotProject(t *testing.T) {
+	t.Setenv("ATN_PACKAGE_DIAGNOSTICS", "1")
+	dir := privateDir(t)
+	sink, err := os.CreateTemp(t.TempDir(), "capture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sink.Close()
+	func() {
+		stdout, stderr := os.Stdout, os.Stderr
+		os.Stdout, os.Stderr = sink, sink
+		defer func() { os.Stdout, os.Stderr = stdout, stderr }()
+		assertParentDiagnostic(t, dir, "leaf-missing", "exists", errPrivate)
+		assertParentDiagnostic(t, filepath.Join(dir, "SENSITIVE missing"), "", "", nil)
+	}()
+	info, err := sink.Stat()
+	if err != nil || info.Size() != 0 {
+		t.Fatal("store printed a developer diagnostic")
+	}
+}
 
 func TestPrivateDirectoryParentChecksOnlyMissingLeaf(t *testing.T) {
 	dir := privateDir(t)

@@ -85,23 +85,45 @@ func safeTarget(path string) bool {
 // The caller owns the directory; this is not a sandbox against its own owner
 // concurrently renaming parent directories.
 func safePath(path string, missingLeaf bool) bool {
+	return safePathFailure(path, missingLeaf) == nil
+}
+
+// The bool wrapper and parent diagnostics share this single traversal. Only
+// fixed labels escape a rejected predicate; no diagnostic rescan is performed.
+func safePathFailure(path string, missingLeaf bool) *privateStateError {
 	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return false
+		return &privateStateError{"path", "rejected"}
 	}
 	leaf := true
 	for current := path; ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
 		if err != nil {
 			if !(leaf && missingLeaf && os.IsNotExist(err)) {
-				return false
+				if leaf {
+					return &privateStateError{"leaf-stat", nativeErrorCategory(err)}
+				}
+				return &privateStateError{"ancestor-stat", nativeErrorCategory(err)}
 			}
-		} else if info.Mode()&os.ModeSymlink != 0 || nativeReparse(current) || (!leaf && (!info.IsDir() || !nativeTrustedAncestor(current))) {
-			return false
+		} else {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return &privateStateError{"symlink", "rejected"}
+			}
+			if failure := nativeReparseFailure(current); failure != nil {
+				return failure
+			}
+			if !leaf {
+				if !info.IsDir() {
+					return &privateStateError{"ancestor-directory", "rejected"}
+				}
+				if failure := nativeTrustedAncestorFailure(current); failure != nil {
+					return failure
+				}
+			}
 		}
 		if filepath.Dir(current) == current {
 			break
 		}
 		leaf = false
 	}
-	return true
+	return nil
 }

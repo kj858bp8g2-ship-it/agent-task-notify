@@ -37,10 +37,24 @@ func nativeMkdir(path string) error {
 	}
 	return nil
 }
-func nativeReparse(path string) bool { return false } // lstat handles Darwin symlinks.
+func nativeReparse(path string) bool { return nativeReparseFailure(path) != nil }
+
+// lstat handles Darwin symlinks without another native query.
+func nativeReparseFailure(path string) *privateStateError { return nil }
+
 func nativeTrustedAncestor(path string) bool {
+	return nativeTrustedAncestorFailure(path) == nil
+}
+
+func nativeTrustedAncestorFailure(path string) *privateStateError {
 	var stat unix.Stat_t
-	return unix.Lstat(path, &stat) == nil && (stat.Uid == uint32(os.Geteuid()) || stat.Uid == 0)
+	if err := unix.Lstat(path, &stat); err != nil {
+		return &privateStateError{"owner-query", nativeErrorCategory(err)}
+	}
+	if stat.Uid == uint32(os.Geteuid()) || stat.Uid == 0 {
+		return nil
+	}
+	return &privateStateError{"ancestor-owner", "rejected"}
 }
 func nativePrivate(path string, directory bool) bool {
 	var stat unix.Stat_t

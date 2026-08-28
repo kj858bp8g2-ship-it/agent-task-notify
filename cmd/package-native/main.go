@@ -455,7 +455,16 @@ func verifyContents(entries []entry, platform string) error {
 // current-user ownership even when Windows defaults new objects to Administrators.
 func newOwnedDirectory(path string, diagnostics packageDiagnostics) error {
 	diagnostics.stage("directory-parent")
-	if !absolutePath(path) || store.CheckPrivateDirectoryParent(path) != nil {
+	if !absolutePath(path) {
+		return errPackage
+	}
+	stage, category, err := store.CheckPrivateDirectoryParentDiagnostic(path)
+	if err != nil {
+		if diagnostics {
+			// Both fields are fixed code-owned labels from this same check,
+			// never input, a native error, or a second filesystem scan.
+			fmt.Fprintf(os.Stderr, "native package parent: stage=%s category=%s\n", stage, category)
+		}
 		return errPackage
 	}
 	diagnostics.stage("directory-create")
