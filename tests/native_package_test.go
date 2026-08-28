@@ -127,6 +127,11 @@ func TestNativePackage(t *testing.T) {
 		t.Fatal("manifest mismatch")
 	}
 	extract := filepath.Join(t.TempDir(), "中文 空格 candidate")
+	if runtime.GOOS == "darwin" {
+		// A POSIX filename may contain a literal backslash; Windows root
+		// normalization must not redirect this valid packaged location.
+		extract += `\literal`
+	}
 	verifyArgs := []string{"verify", "--archive", archive, "--checksums", sums, "--platform", platform, "--version", "0.2.0-rc.1", "--extract-to", extract}
 	output := packageRun(t, tool, true, verifyArgs...)
 	if !strings.Contains(output, "verified agent-task-notify 0.2.0-rc.1 "+platform) || !strings.Contains(output, "doctor and six dry previews passed") {
@@ -342,14 +347,24 @@ func TestNativePackage(t *testing.T) {
 			commands[event] = groups[0].Hooks[0].Command
 		}
 		packagedRoot := filepath.ToSlash(filepath.Join(extract, "workbuddy"))
+		cases := []string{"primary", "fallback", "primary-wins", "no-root", "relative-root", "missing-launcher", "script-startup-failure", "script-syntax-failure"}
+		if runtime.GOOS == "windows" {
+			cases = append(cases, "windows-native-primary", "windows-native-fallback", "windows-native-primary-wins")
+		}
 		for _, event := range []string{"UserPromptSubmit", "Stop"} {
-			for _, name := range []string{"primary", "fallback", "primary-wins", "no-root", "relative-root", "missing-launcher", "script-startup-failure", "script-syntax-failure"} {
+			for _, name := range cases {
 				t.Run(event+"/"+name, func(t *testing.T) {
 					dir := t.TempDir()
 					primary, fallback, wantRun := packagedRoot, "", true
 					switch name {
 					case "fallback":
 						primary, fallback = "", packagedRoot
+					case "windows-native-primary":
+						primary = filepath.Join(extract, "workbuddy")
+					case "windows-native-fallback":
+						primary, fallback = "", filepath.Join(extract, "workbuddy")
+					case "windows-native-primary-wins":
+						primary, fallback, wantRun = filepath.Join(dir, "missing"), filepath.Join(extract, "workbuddy"), false
 					case "primary-wins":
 						primary, fallback, wantRun = filepath.ToSlash(filepath.Join(dir, "missing")), packagedRoot, false
 					case "no-root":
