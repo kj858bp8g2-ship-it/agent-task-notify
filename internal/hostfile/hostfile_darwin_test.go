@@ -13,6 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func predictionDetails(s Snapshot) string { return "native=darwin" }
+
 func hostDirectory(t *testing.T) string {
 	t.Helper()
 	root, err := filepath.EvalSymlinks(t.TempDir())
@@ -285,7 +287,12 @@ func TestDarwinEmptyACLFlagsAreNotDiscarded(t *testing.T) {
 	if err := exec.CommandContext(ctx, "/usr/bin/clang", "-Wall", "-Wextra", "-Werror", source, "-o", binary).Run(); err != nil {
 		t.Fatal("fixture compile failed")
 	}
-	if err := exec.CommandContext(ctx, binary, path).Run(); err != nil {
+	out, err := exec.CommandContext(ctx, binary, path).CombinedOutput()
+	if len(out) > 2048 {
+		t.Fatal("fixture diagnostic exceeded bound")
+	}
+	t.Log(string(out))
+	if err != nil {
 		t.Fatal("fixture empty ACL flag setup failed")
 	}
 	before := snapshot(t, path)
@@ -309,6 +316,58 @@ const darwinEmptyACLFixture = `
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+static void report_acl(const char *stage, int status, int saved_errno, acl_t acl, int present) {
+    int count = -1, no_inherit = -1, defer_inherit = -1;
+    ssize_t copied = -1;
+    if (acl != NULL) {
+        acl_entry_t entry;
+        count = 0;
+        int next = ACL_FIRST_ENTRY;
+        while (count <= ACL_MAX_ENTRIES && acl_get_entry(acl, next, &entry) == 0) {
+            count++;
+            next = ACL_NEXT_ENTRY;
+        }
+        acl_flagset_t flags;
+        if (acl_get_flagset_np(acl, &flags) == 0) {
+            no_inherit = acl_get_flag_np(flags, ACL_FLAG_NO_INHERIT);
+            defer_inherit = acl_get_flag_np(flags, ACL_FLAG_DEFER_INHERIT);
+        }
+        ssize_t size = acl_size(acl);
+        if (size > 0 && size <= 1048576) {
+            void *buffer = calloc(1, (size_t)size);
+            if (buffer != NULL) { copied = acl_copy_ext(buffer, acl, size); free(buffer); }
+        }
+    }
+    printf("stage=%s status=%d errno=%d present=%d entries=%d no-inherit=%d defer-inherit=%d serialized-length=%ld\n",
+        stage, status, saved_errno, present, count, no_inherit, defer_inherit, (long)copied);
+}
+static void report_fd(const char *stage, int fd) {
+    errno = 0;
+    acl_t acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
+    int saved_errno = errno;
+    report_acl(stage, acl == NULL ? -1 : 0, saved_errno, acl, acl == NULL ? -1 : 1);
+    if (acl != NULL) acl_free(acl);
+}
+static void report_filesec(int fd) {
+    errno = 0;
+    filesec_t security = filesec_init();
+    int status = -1, present = -1, saved_errno = errno;
+    acl_t acl = NULL;
+    struct stat st;
+    if (security != NULL) {
+        errno = 0;
+        status = fstatx_np(fd, &st, security);
+        if (status == 0) { errno = 0; status = filesec_query_property(security, FILESEC_ACL, &present); }
+        if (status == 0 && present) { errno = 0; status = filesec_get_property(security, FILESEC_ACL, &acl); }
+        saved_errno = errno;
+        filesec_free(security);
+    }
+    report_acl("fstatx-FILESEC_ACL", status, saved_errno, acl, present);
+    if (acl != NULL) acl_free(acl);
+}
 int main(int argc, char **argv) {
     if (argc != 2) return 2;
     int fd = open(argv[1], O_RDWR|O_NOFOLLOW|O_CLOEXEC);
@@ -318,11 +377,23 @@ int main(int argc, char **argv) {
     acl_t acl = acl_init(0);
     acl_flagset_t flags;
     if (acl == NULL) { close(fd); return 5; }
+    errno = 0;
     int ok = acl_get_flagset_np(acl, &flags) == 0 &&
-        acl_add_flag_np(flags, ACL_FLAG_NO_INHERIT) == 0 &&
-        acl_set_fd_np(fd, acl, ACL_TYPE_EXTENDED) == 0;
+        acl_add_flag_np(flags, ACL_FLAG_NO_INHERIT) == 0;
+    report_acl("constructed", ok ? 0 : -1, errno, acl, 1);
+    errno = 0;
+    ok = ok && acl_set_fd_np(fd, acl, ACL_TYPE_EXTENDED) == 0;
+    int set_errno = errno;
     acl_free(acl);
+    if (!ok) { report_acl("post-set-same-fd", -1, set_errno, NULL, -1); close(fd); return 6; }
+    report_fd("post-set-same-fd", fd);
+    report_filesec(fd);
     close(fd);
-    return ok ? 0 : 6;
+    fd = open(argv[1], O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+    if (fd < 0) { report_acl("reopened", -1, errno, NULL, -1); return 7; }
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid()) { close(fd); return 8; }
+    report_fd("reopened", fd);
+    close(fd);
+    return 0;
 }
 `

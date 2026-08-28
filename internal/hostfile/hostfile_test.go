@@ -32,7 +32,7 @@ func TestAccessDigestsPredictNativeReplacementAndRemoval(t *testing.T) {
 		}
 		candidates, err := before.ExpectedAccessDigests(true)
 		if err != nil {
-			t.Fatal(err)
+			t.Fatalf("stage=expected-before present=%t %s", present, predictionDetails(before))
 		}
 		if len(candidates) < 1 || len(candidates) > 2 {
 			t.Fatal("unbounded access candidates")

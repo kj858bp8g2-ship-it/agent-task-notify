@@ -170,6 +170,13 @@ func nativePath(path string) bool {
 		if (part != "" && !filepath.IsLocal(part)) || strings.Contains(part, ":") || strings.TrimRight(part, ". ") != part {
 			return false
 		}
+		// IsLocal delegates device names with extensions to Windows, whose
+		// answer varies by OS version. Keep our conservative device refusal.
+		stem, _, _ := strings.Cut(part, ".")
+		stem = strings.TrimRight(stem, " ")
+		if stem != "" && !filepath.IsLocal(stem) {
+			return false
+		}
 	}
 	return true
 }

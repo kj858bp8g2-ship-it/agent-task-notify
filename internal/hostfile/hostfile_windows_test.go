@@ -3,10 +3,12 @@ package hostfile
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 	"time"
 	"unsafe"
@@ -104,7 +106,7 @@ func TestWindowsUnprotectedInheritedACLAndDigestPreserved(t *testing.T) {
 	access := accessListing(t, path)
 	candidates, err := before.ExpectedAccessDigests(true)
 	if err != nil || len(candidates) != 1 {
-		t.Fatal("unprotected candidate prediction")
+		t.Fatal("stage=unprotected-prediction", predictionDetails(before))
 	}
 	source, err := nativeOpen(path, true)
 	if err != nil {
@@ -475,10 +477,77 @@ func TestWindowsSecurityCopyAllowsOnlyProtectedForwardAI(t *testing.T) {
 }
 
 func TestWindowsDeviceAndAlternateNamesRejected(t *testing.T) {
-	for _, name := range []string{`C:\host\NUL`, `C:\host\COM1.txt`, `C:\host\file:stream`, `C:\host\file.`, `\\?\C:\host\file`} {
-		if nativePath(name) {
-			t.Fatal("ambiguous or device path accepted")
+	for _, tc := range []struct {
+		name, path string
+		allowed    bool
+	}{
+		{"bare-device", `C:\host\NUL`, false},
+		{"device-extension", `C:\host\COM1.txt`, false},
+		{"device-spaced-extension", `C:\host\lPt9 .json`, false},
+		{"device-multiple-extensions", `C:\host\aux.settings.json`, false},
+		{"alternate-stream", `C:\host\file:stream`, false},
+		{"trailing-dot", `C:\host\file.`, false},
+		{"device-namespace", `\\?\C:\host\file`, false},
+		{"dotfile", `C:\host\.settings.json`, true},
+		{"ordinary-extension", `C:\host\settings.json`, true},
+		{"device-prefix-only", `C:\host\COM10.json`, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if nativePath(tc.path) != tc.allowed {
+				t.Fatal("path category policy mismatch")
+			}
+		})
+	}
+}
+
+// Fixed bounded fields only: never print paths, SID strings or ACL bytes.
+func predictionDetails(s Snapshot) string {
+	if s.state == nil {
+		return "snapshot=invalid"
+	}
+	a := s.state.access
+	if !s.state.exists {
+		a = s.state.newAccess
+	}
+	count, kind, flags := -1, -1, -1
+	if len(a.policy) >= 8 {
+		count = int(binary.LittleEndian.Uint16([]byte(a.policy[4:6])))
+	}
+	if count > 0 && len(a.policy) >= 12 {
+		kind, flags = int(a.policy[8]), int(a.policy[9])
+	}
+	const propagation = windows.OBJECT_INHERIT_ACE | windows.CONTAINER_INHERIT_ACE | windows.INHERIT_ONLY_ACE | windows.NO_PROPAGATE_INHERIT_ACE
+	const saclControls = windows.SE_SACL_PRESENT | windows.SE_SACL_DEFAULTED | windows.SE_SACL_AUTO_INHERIT_REQ | windows.SE_SACL_AUTO_INHERITED | windows.SE_SACL_PROTECTED
+	malformed, propagatingDACL := len(a.dacl) < 8, false
+	if !malformed {
+		offset := 8
+		for range int(binary.LittleEndian.Uint16([]byte(a.dacl[4:6]))) {
+			if offset+4 > len(a.dacl) {
+				malformed = true
+				break
+			}
+			size := int(binary.LittleEndian.Uint16([]byte(a.dacl[offset+2 : offset+4])))
+			if size < 4 || offset+size > len(a.dacl) {
+				malformed = true
+				break
+			}
+			propagatingDACL = propagatingDACL || a.dacl[offset+1]&propagation != 0
+			offset += size
 		}
+	}
+	return fmt.Sprintf("control=%04x attrs=%x policy-present=%t policy-length=%d policy-count=%d policy-type=%d policy-flags=%d readonly=%t residual-policy=%t propagating-policy=%t unconverted-dacl=%t malformed-dacl=%t propagating-dacl=%t",
+		a.control, a.attributes, a.policyPresent, len(a.policy), count, kind, flags, !a.writable(), len(a.policy) <= 8 && (a.policyPresent || a.control&saclControls != 0), flags >= 0 && flags&propagation != 0, a.control&(windows.SE_DACL_PROTECTED|windows.SE_DACL_AUTO_INHERITED) == 0, malformed, propagatingDACL)
+}
+
+func TestWindowsPredictionDiagnosticDoesNotExposeMetadata(t *testing.T) {
+	canary := "synthetic-sensitive-value"
+	s := Snapshot{Data: []byte(canary), state: &observation{exists: true, path: canary, access: nativeAccess{owner: canary, group: canary, dacl: canary, policy: canary, descriptor: canary}}}
+	got := predictionDetails(s)
+	if len(got) > 384 || strings.Contains(got, canary) {
+		t.Fatal("prediction diagnostic leaked or exceeded bound")
+	}
+	if predictionDetails(Snapshot{}) != "snapshot=invalid" {
+		t.Fatal("invalid snapshot diagnostic")
 	}
 }
 
