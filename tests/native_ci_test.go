@@ -14,6 +14,49 @@ import (
 	"time"
 )
 
+// Canonical provenance is a release invariant: the Mac26 consumers must fetch
+// the Mac15 artifacts, not silently build their own replacement executable.
+func TestNativeCICanonicalPackages(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "native.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := strings.ReplaceAll(string(data), "\r\n", "\n")
+	parts := strings.Split(source, "\n  package-check:\n")
+	if len(parts) != 2 {
+		t.Fatal("dependent canonical package-check job missing")
+	}
+	build, check := parts[0], parts[1]
+	for _, value := range []string{"needs: native", "contents: read", "actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53", "go run ./cmd/package-native verify", "--checksums", "--extract-to"} {
+		if !strings.Contains(check, value) {
+			t.Fatalf("package-check missing provenance gate %q", value)
+		}
+	}
+	for _, pair := range [][2]string{{"windows-latest", "windows-amd64"}, {"macos-15", "darwin-arm64"}, {"macos-15-intel", "darwin-amd64"}, {"macos-26", "darwin-arm64"}, {"macos-26-intel", "darwin-amd64"}} {
+		if !strings.Contains(check, "os: "+pair[0]+"\n            platform: "+pair[1]) {
+			t.Fatal("canonical consumer mapping missing", pair)
+		}
+		canonical := "true"
+		if strings.HasPrefix(pair[0], "macos-26") {
+			canonical = "false"
+		}
+		if !strings.Contains(build, "os: "+pair[0]+"\n            platform: "+pair[1]+"\n            canonical: "+canonical) {
+			t.Fatal("canonical producer mapping changed", pair)
+		}
+	}
+	if strings.Count(build, "canonical: true") != 3 || strings.Count(build, "canonical: false") != 2 || strings.Count(check, "          - os:") != 5 {
+		t.Fatal("canonical producer/consumer count changed")
+	}
+	for _, value := range []string{"go run ./cmd/package-native build", "name: native-candidate-${{ matrix.platform }}", "if: matrix.canonical", "node --test tests/opencode-bridge.test.mjs", "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }"} {
+		if !strings.Contains(build, value) {
+			t.Fatalf("canonical producer missing gate %q", value)
+		}
+	}
+	if strings.Contains(check, "./cmd/agent-task-notify") || strings.Contains(check, "package-native build") || strings.Contains(source, "contents: write") {
+		t.Fatal("consumer rebuild or release authority is forbidden")
+	}
+}
+
 func TestNativeCIDiagnosticProjectionBoundsAndRedaction(t *testing.T) {
 	for _, c := range []struct{ line, kind, want string }{
 		{"create-keychain -p SECRET /PRIVATE/synthetic.keychain-db", "security", "create"},
@@ -484,13 +527,13 @@ func assertNativeCICleanup(t *testing.T, runnerTemp, log string, mutated bool, f
 	}
 }
 
-func TestNativeWorkflowArtifactNameIncludesMatrixLabelAndRunnerIdentity(t *testing.T) {
+func TestNativeWorkflowCanonicalArtifactNameMatchesProducerAndConsumer(t *testing.T) {
 	workflow, err := os.ReadFile(filepath.Join("..", ".github", "workflows", "native.yml"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(workflow), "name: native-candidate-${{ matrix.os }}-${{ runner.os }}-${{ runner.arch }}") {
-		t.Fatal("artifact name must include matrix label plus runner OS and architecture")
+	if strings.Count(string(workflow), "name: native-candidate-${{ matrix.platform }}") != 2 {
+		t.Fatal("canonical artifact name must match exactly between producer and consumer")
 	}
 }
 

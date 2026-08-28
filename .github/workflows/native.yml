@@ -1,4 +1,4 @@
-name: Native foundation gates
+name: Native candidate gates
 
 on:
   push:
@@ -15,7 +15,22 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, macos-15, macos-15-intel, macos-26, macos-26-intel]
+        include:
+          - os: windows-latest
+            platform: windows-amd64
+            canonical: true
+          - os: macos-15
+            platform: darwin-arm64
+            canonical: true
+          - os: macos-15-intel
+            platform: darwin-amd64
+            canonical: true
+          - os: macos-26
+            platform: darwin-arm64
+            canonical: false
+          - os: macos-26-intel
+            platform: darwin-amd64
+            canonical: false
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -37,26 +52,71 @@ jobs:
         run: go test -count=1 ./...
       - name: Vet native source
         run: go vet ./...
-      - name: Build unsigned candidate
+      - name: Check native and legacy OpenCode bridge
+        run: node --test tests/opencode-bridge.test.mjs
+      - name: Build canonical unsigned candidate archive
+        if: matrix.canonical
         id: candidate
         shell: pwsh
         run: |
-          $candidate = Join-Path $env:RUNNER_TEMP 'atn-native-candidate'
-          New-Item -ItemType Directory -Force -Path $candidate | Out-Null
+          $candidate = Join-Path $env:RUNNER_TEMP 'atn-native-archive'
           $suffix = if ($env:RUNNER_OS -eq 'Windows') { '.exe' } else { '' }
-          go build -trimpath -o (Join-Path $candidate "agent-task-notify$suffix") ./cmd/agent-task-notify
-          if ($env:RUNNER_OS -eq 'macOS') {
-            $notice = @(
-              'UNSIGNED CANDIDATE — CI test artifact only.',
-              'This artifact is not notarized or signed for end-user distribution.',
-              'No Gatekeeper or quarantine bypass instructions are provided.'
-            ) -join "`n"
-            [IO.File]::WriteAllText((Join-Path $candidate 'UNSIGNED-CANDIDATE.txt'), "$notice`n", [Text.UTF8Encoding]::new($false))
-          }
+          $binary = Join-Path $env:RUNNER_TEMP "agent-task-notify$suffix"
+          go build -trimpath -o $binary ./cmd/agent-task-notify
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          go run ./cmd/package-native build --source-root $env:GITHUB_WORKSPACE --binary $binary --platform '${{ matrix.platform }}' --version 0.2.0-rc.1 --output $candidate
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Content -LiteralPath (Join-Path $candidate 'SHA256SUMS')
           "path=$candidate" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-      - name: Upload candidate artifact
+      - name: Upload canonical candidate archive
+        if: matrix.canonical
         uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
         with:
-          name: native-candidate-${{ matrix.os }}-${{ runner.os }}-${{ runner.arch }}
+          name: native-candidate-${{ matrix.platform }}
           path: ${{ steps.candidate.outputs.path }}
           if-no-files-found: error
+
+  package-check:
+    needs: native
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            platform: windows-amd64
+          - os: macos-15
+            platform: darwin-arm64
+          - os: macos-15-intel
+            platform: darwin-amd64
+          - os: macos-26
+            platform: darwin-arm64
+          - os: macos-26-intel
+            platform: darwin-amd64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version: '1.27.0'
+          check-latest: false
+      - name: Verify pinned modules
+        run: go mod verify
+      - name: Download the canonical architecture archive
+        uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6; official commit recorded in packaging evidence
+        with:
+          name: native-candidate-${{ matrix.platform }}
+          path: ${{ runner.temp }}/atn-canonical-download
+      - name: Verify and run the downloaded canonical archive
+        shell: pwsh
+        run: |
+          $download = Join-Path $env:RUNNER_TEMP 'atn-canonical-download'
+          $extension = if ($env:RUNNER_OS -eq 'Windows') { '.zip' } else { '.tar.gz' }
+          $archive = Join-Path $download "atn-native-0.2.0-rc.1-${{ matrix.platform }}$extension"
+          $extract = Join-Path $env:RUNNER_TEMP '原生 package verified'
+          Write-Output "source=$env:GITHUB_SHA os=$env:RUNNER_OS arch=$env:RUNNER_ARCH canonical=${{ matrix.platform }}"
+          go run ./cmd/package-native verify --archive $archive --checksums (Join-Path $download 'SHA256SUMS') --platform '${{ matrix.platform }}' --version 0.2.0-rc.1 --extract-to $extract
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-Content -LiteralPath (Join-Path $download 'SHA256SUMS')

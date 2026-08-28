@@ -7,7 +7,7 @@ import (
 	"runtime"
 )
 
-const Version = "0.2.0-dev"
+const Version = "0.2.0-rc.1"
 
 func Run(args []string, stdout, stderr io.Writer) int {
 	return RunWithInput(args, os.Stdin, stdout, stderr)

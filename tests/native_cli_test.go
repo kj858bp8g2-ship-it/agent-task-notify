@@ -40,7 +40,7 @@ func TestNativeCLIWithoutLanguageRuntime(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run version command: %v", err)
 	}
-	if got, want := string(output), "agent-task-notify 0.2.0-dev "+runtime.GOOS+"/"+runtime.GOARCH+"\n"; got != want {
+	if got, want := string(output), "agent-task-notify 0.2.0-rc.1 "+runtime.GOOS+"/"+runtime.GOARCH+"\n"; got != want {
 		t.Fatalf("version stdout = %q, want %q", got, want)
 	}
 	if got := versionStderr.String(); got != "" {

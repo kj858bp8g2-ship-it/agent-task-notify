@@ -4,6 +4,7 @@
   "config/embed.go",
   "assets/embed.go",
   "cmd/agent-task-notify/main.go",
+  "cmd/package-native/main.go",
   "internal/cli/app.go",
   "internal/cli/app_test.go",
   "internal/cli/commands.go",
@@ -20,6 +21,7 @@
   "internal/adapters/adapters.go",
   "internal/adapters/adapters_test.go",
   "tests/native_cli_test.go",
+  "tests/native_package_test.go",
   "tests/native_runtime_test.go",
   "internal/secrets/vault.go",
   "internal/secrets/envelope.go",
@@ -83,5 +85,10 @@
   ".github/workflows/native.yml",
   "scripts/native-ci-macos.sh",
   "docs/native-validation.md",
+  "docs/native-installation.md",
+  "docs/native-installation.zh-CN.md",
+  "integrations/workbuddy/native/hooks.json",
+  "integrations/workbuddy/native/launch.sh",
+  "integrations/workbuddy/native/.gitattributes",
   "docs/superpowers/plans/2026-08-28-native-migration.md"
 ]
