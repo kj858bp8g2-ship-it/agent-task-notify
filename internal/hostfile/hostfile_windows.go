@@ -1,6 +1,7 @@
 package hostfile
 
 import (
+	"encoding/binary"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,33 +13,90 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-const securityFields = windows.OWNER_SECURITY_INFORMATION | windows.GROUP_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION
+const copySecurityFields = windows.OWNER_SECURITY_INFORMATION | windows.GROUP_SECURITY_INFORMATION | windows.DACL_SECURITY_INFORMATION
+
+// These access-policy portions require READ_CONTROL, not full SACL access.
+const securityFields = copySecurityFields | windows.LABEL_SECURITY_INFORMATION | windows.ATTRIBUTE_SECURITY_INFORMATION | windows.SCOPE_SECURITY_INFORMATION
 
 type nativeAccess struct {
 	descriptor         string
 	owner, group, dacl string
 	control            windows.SECURITY_DESCRIPTOR_CONTROL
 	attributes         uint32
+	policyPresent      bool
+	policy             string
 }
 
 func (access nativeAccess) canonical() []byte {
-	return canonicalFields("windows", access.owner, access.group, access.dacl, strconv.FormatUint(uint64(access.control), 10), strconv.FormatUint(uint64(access.attributes), 10))
+	return canonicalFields("windows-access-v2", access.owner, access.group, access.dacl, strconv.FormatUint(uint64(access.control), 10), strconv.FormatUint(uint64(access.attributes), 10), strconv.FormatBool(access.policyPresent), access.policy)
 }
 
 func nativeDefaultAccess(parent string) (nativeAccess, error) {
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if _, err := nativeParent(parent); err != nil {
+		return nativeAccess{}, ErrUnsafe
+	}
+	sd, err := creationDescriptor(true)
 	if err != nil {
 		return nativeAccess{}, ErrUnsafe
 	}
-	group, err := windows.GetCurrentProcessToken().GetTokenPrimaryGroup()
-	if err != nil {
-		return nativeAccess{}, ErrUnsafe
-	}
-	sd, err := windows.SecurityDescriptorFromString("O:" + user.User.Sid.String() + "G:" + group.PrimaryGroup.String() + "D:P(A;;FA;;;" + user.User.Sid.String() + ")")
-	if err != nil {
+	// Deliberate SetSecurityInfo(LABEL) initialization marks the SACL as AI.
+	// This is a new explicit creation policy, not Windows' implicit default.
+	// A different OS result is rejected before the first payload byte.
+	if err := sd.SetControl(windows.SE_SACL_AUTO_INHERITED, windows.SE_SACL_AUTO_INHERITED); err != nil {
 		return nativeAccess{}, ErrUnsafe
 	}
 	return accessFromDescriptor(sd, 0)
+}
+
+func validTokenIntegrity(label windows.SIDAndAttributes) bool {
+	if label.Sid == nil || !label.Sid.IsValid() || label.Sid.IdentifierAuthority() != windows.SECURITY_MANDATORY_LABEL_AUTHORITY || label.Sid.SubAuthorityCount() != 1 ||
+		label.Attributes&windows.SE_GROUP_INTEGRITY == 0 || label.Attributes & ^uint32(windows.SE_GROUP_INTEGRITY|windows.SE_GROUP_INTEGRITY_ENABLED) != 0 {
+		return false
+	}
+	switch label.Sid.SubAuthority(0) {
+	case 0x1000, 0x2000, 0x2100, 0x3000: // LOW, MEDIUM, MEDIUM_PLUS, HIGH only.
+		return true
+	}
+	return false
+}
+
+func creationDescriptor(newTarget bool) (*windows.SECURITY_DESCRIPTOR, error) {
+	var token windows.Token
+	if err := windows.OpenProcessToken(windows.CurrentProcess(), windows.TOKEN_QUERY, &token); err != nil {
+		return nil, ErrUnsafe
+	}
+	defer token.Close()
+	user, err := token.GetTokenUser()
+	if err != nil || user.User.Sid == nil || !user.User.Sid.IsValid() {
+		return nil, ErrUnsafe
+	}
+	group, err := token.GetTokenPrimaryGroup()
+	if err != nil || group.PrimaryGroup == nil || !group.PrimaryGroup.IsValid() {
+		return nil, ErrUnsafe
+	}
+	value := "O:" + user.User.Sid.String() + "G:" + group.PrimaryGroup.String() + "D:P(A;;FA;;;" + user.User.Sid.String() + ")"
+	if newTarget {
+		var size uint32
+		if err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel, nil, 0, &size); err != windows.ERROR_INSUFFICIENT_BUFFER || size < uint32(unsafe.Sizeof(windows.Tokenmandatorylabel{})) || size > 4096 {
+			return nil, ErrUnsafe
+		}
+		buffer := make([]byte, size)
+		if err := windows.GetTokenInformation(token, windows.TokenIntegrityLevel, &buffer[0], size, &size); err != nil {
+			return nil, ErrUnsafe
+		}
+		label := (*windows.Tokenmandatorylabel)(unsafe.Pointer(&buffer[0])).Label
+		if !validTokenIntegrity(label) {
+			return nil, ErrUnsafe
+		}
+		// HIGH can be stricter than an implicit medium label. Do not lower it.
+		value += "S:(ML;;NW;;;" + label.Sid.String() + ")"
+		runtime.KeepAlive(buffer)
+	}
+	sd, err := windows.SecurityDescriptorFromString(value)
+	if err != nil {
+		return nil, ErrUnsafe
+	}
+	return sd, nil
 }
 
 func nativeExpectedAccess(access nativeAccess, existing bool) ([]nativeAccess, error) {
@@ -46,6 +104,13 @@ func nativeExpectedAccess(access nativeAccess, existing bool) ([]nativeAccess, e
 		return nil, ErrUnsafe
 	}
 	if existing {
+		const saclControls = windows.SE_SACL_PRESENT | windows.SE_SACL_DEFAULTED | windows.SE_SACL_AUTO_INHERIT_REQ | windows.SE_SACL_AUTO_INHERITED | windows.SE_SACL_PROTECTED
+		if (len(access.policy) <= 8 && (access.policyPresent || access.control&saclControls != 0)) ||
+			(len(access.policy) > 8 && access.policy[9]&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE|windows.INHERIT_ONLY_ACE|windows.NO_PROPAGATE_INHERIT_ACE) != 0) {
+			// No label copy can reproduce residual SACL controls, and regular
+			// file propagation flags may be rewritten. Do not predict either.
+			return nil, ErrUnsafe
+		}
 		if access.control&(windows.SE_DACL_PROTECTED|windows.SE_DACL_AUTO_INHERITED) == 0 {
 			return nil, ErrUnsafe
 		}
@@ -86,7 +151,8 @@ func preservedAccess(source, destination nativeAccess) bool {
 	// complete ACL bytes, attributes and every other descriptor control bit.
 	return source.control&windows.SE_DACL_PROTECTED != 0 && source.control&windows.SE_DACL_AUTO_INHERITED == 0 &&
 		destination.control == source.control|windows.SE_DACL_AUTO_INHERITED && source.owner == destination.owner &&
-		source.group == destination.group && source.dacl == destination.dacl && source.attributes == destination.attributes
+		source.group == destination.group && source.dacl == destination.dacl && source.attributes == destination.attributes &&
+		source.policyPresent == destination.policyPresent && source.policy == destination.policy
 }
 
 func (access nativeAccess) writable() bool {
@@ -141,8 +207,12 @@ func nativeParent(path string) (os.FileInfo, error) {
 	file := os.NewFile(uintptr(h), path)
 	defer file.Close()
 	var info windows.ByHandleFileInformation
-	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	sd, err := windows.GetSecurityInfo(h, windows.SE_FILE_OBJECT, securityFields)
 	if err != nil || !ownedDescriptor(sd) || windows.GetFileInformationByHandle(h, &info) != nil || info.FileAttributes&windows.FILE_ATTRIBUTE_DIRECTORY == 0 || info.FileAttributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return nil, ErrUnsafe
+	}
+	policy, _, err := accessPolicy(sd)
+	if err != nil || (len(policy) > 8 && policy[9]&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE|windows.INHERIT_ONLY_ACE|windows.NO_PROPAGATE_INHERIT_ACE) != 0) {
 		return nil, ErrUnsafe
 	}
 	return file.Stat()
@@ -202,6 +272,10 @@ func accessFromDescriptor(sd *windows.SECURITY_DESCRIPTOR, attributes uint32) (n
 	if err != nil {
 		return nativeAccess{}, ErrUnsafe
 	}
+	policy, present, err := accessPolicy(sd)
+	if err != nil {
+		return nativeAccess{}, ErrUnsafe
+	}
 	value := sd.String()
 	if value == "" {
 		return nativeAccess{}, ErrUnsafe
@@ -217,15 +291,49 @@ func accessFromDescriptor(sd *windows.SECURITY_DESCRIPTOR, attributes uint32) (n
 		return nativeAccess{}, ErrUnsafe
 	}
 	dacl := string(unsafe.Slice((*byte)(unsafe.Pointer(acl)), length))
-	return nativeAccess{descriptor: value, owner: owner.String(), group: group.String(), dacl: dacl, control: control, attributes: attributes}, nil
+	return nativeAccess{descriptor: value, owner: owner.String(), group: group.String(), dacl: dacl, control: control, attributes: attributes, policy: policy, policyPresent: present}, nil
 }
 
-func nativeCreate(path string) (*os.File, error) {
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+func accessPolicy(sd *windows.SECURITY_DESCRIPTOR) (string, bool, error) {
+	control, _, err := sd.Control()
 	if err != nil {
+		return "", false, ErrUnsafe
+	}
+	acl, _, err := sd.SACL()
+	present := control&windows.SE_SACL_PRESENT != 0
+	if !present && err == windows.ERROR_OBJECT_NOT_FOUND {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, ErrUnsafe
+	}
+	if acl == nil {
+		return "", present, nil
+	}
+	header := unsafe.Slice((*byte)(unsafe.Pointer(acl)), 8)
+	length := int(binary.LittleEndian.Uint16(header[2:]))
+	if length < 8 {
+		return "", false, ErrUnsafe
+	}
+	data := unsafe.Slice((*byte)(unsafe.Pointer(acl)), length)
+	count := binary.LittleEndian.Uint16(data[4:])
+	if count == 0 {
+		return string(data), present, nil
+	}
+	// Only a single well-formed mandatory label is supported. Resource
+	// attributes, scoped policy IDs, unknown ACEs and mixed ACLs fail closed.
+	if count != 1 || length < 28 || data[8] != 17 || data[9] & ^byte(0x1f) != 0 || binary.LittleEndian.Uint16(data[10:]) != 20 ||
+		binary.LittleEndian.Uint32(data[12:]) & ^uint32(7) != 0 || string(data[16:24]) != "\x01\x01\x00\x00\x00\x00\x00\x10" {
+		return "", false, ErrUnsafe
+	}
+	return string(data), present, nil
+}
+
+func nativeCreate(path string, newTarget bool) (*os.File, error) {
+	if _, err := nativeParent(filepath.Dir(path)); err != nil {
 		return nil, ErrUnsafe
 	}
-	sd, err := windows.SecurityDescriptorFromString("O:" + user.User.Sid.String() + "D:P(A;;FA;;;" + user.User.Sid.String() + ")")
+	sd, err := creationDescriptor(newTarget)
 	if err != nil {
 		return nil, ErrUnsafe
 	}
@@ -240,10 +348,27 @@ func nativeCreate(path string) (*os.File, error) {
 		return nil, err
 	}
 	file := os.NewFile(uintptr(h), path)
+	identity, statErr := file.Stat()
+	fail := func() (*os.File, error) {
+		file.Close()
+		if statErr == nil {
+			cleanupTemporary(path, identity)
+		}
+		return nil, ErrUnsafe
+	}
+	if statErr != nil {
+		return fail()
+	}
+	if newTarget {
+		label, _, err := sd.SACL()
+		if err != nil || windows.SetSecurityInfo(h, windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION, nil, nil, nil, label) != nil {
+			return fail()
+		}
+		runtime.KeepAlive(sd)
+	}
 	actual, err := nativeMetadata(file)
 	if err != nil || actual.control&windows.SE_DACL_PROTECTED == 0 {
-		file.Close()
-		return nil, ErrUnsafe
+		return fail()
 	}
 	return file, nil
 }
@@ -251,6 +376,10 @@ func nativeCreate(path string) (*os.File, error) {
 func nativeCopySecurity(source, destination *os.File, access nativeAccess) error {
 	sd, err := windows.GetSecurityInfo(windows.Handle(source.Fd()), windows.SE_FILE_OBJECT, securityFields)
 	if err != nil || !ownedDescriptor(sd) {
+		return ErrUnsafe
+	}
+	captured, err := accessFromDescriptor(sd, access.attributes)
+	if err != nil || captured != access {
 		return ErrUnsafe
 	}
 	owner, _, err := sd.Owner()
@@ -265,7 +394,7 @@ func nativeCopySecurity(source, destination *os.File, access nativeAccess) error
 	if err != nil || acl == nil {
 		return ErrUnsafe
 	}
-	flags := windows.SECURITY_INFORMATION(securityFields)
+	flags := windows.SECURITY_INFORMATION(copySecurityFields)
 	if access.control&windows.SE_DACL_PROTECTED != 0 {
 		flags |= windows.PROTECTED_DACL_SECURITY_INFORMATION
 	} else {
@@ -274,6 +403,14 @@ func nativeCopySecurity(source, destination *os.File, access nativeAccess) error
 	if err := windows.SetSecurityInfo(windows.Handle(destination.Fd()), windows.SE_FILE_OBJECT, flags, owner, group, acl, nil); err != nil {
 		return ErrUnsafe
 	}
+	if len(access.policy) > 8 && access.policy[4] == 1 {
+		label, _, err := sd.SACL()
+		if err != nil || windows.SetSecurityInfo(windows.Handle(destination.Fd()), windows.SE_FILE_OBJECT, windows.LABEL_SECURITY_INFORMATION, nil, nil, nil, label) != nil {
+			return ErrUnsafe
+		}
+	}
+	// No label initialization/clearing for absent-label sources: clearing can
+	// leave SACL control bits behind, which is not a Ruling44 exception.
 	runtime.KeepAlive(sd)
 	// Set only the newly created temporary object's validated attributes.
 	return setTemporaryAttributes(destination, access.attributes)

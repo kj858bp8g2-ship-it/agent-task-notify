@@ -179,7 +179,7 @@ func nativeMetadata(file *os.File) (nativeAccess, error) {
 	return nativeAccess{st.Uid, st.Gid, st.Mode, st.Flags, string(C.GoBytes(unsafe.Pointer(data), C.int(length)))}, nil
 }
 
-func nativeCreate(path string) (*os.File, error) {
+func nativeCreate(path string, newTarget bool) (*os.File, error) {
 	fd, err := unix.Open(path, unix.O_RDWR|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
 	if err != nil {
 		return nil, err

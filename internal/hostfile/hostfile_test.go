@@ -37,6 +37,9 @@ func TestAccessDigestsPredictNativeReplacementAndRemoval(t *testing.T) {
 		if len(candidates) < 1 || len(candidates) > 2 {
 			t.Fatal("unbounded access candidates")
 		}
+		if !present && len(candidates) != 1 {
+			t.Fatal("new access must have one exact prediction")
+		}
 		for _, value := range append(candidates, initial) {
 			if !regexp.MustCompile(`^[0-9a-f]{64}$`).MatchString(value) {
 				t.Fatal("access digest leaked metadata or has invalid format")

@@ -222,7 +222,7 @@ func prepareTemporary(path string, source *os.File, access nativeAccess) (*os.Fi
 		return nil, nativeAccess{}, ErrUnsafe
 	}
 	temp := filepath.Join(filepath.Dir(path), ".host-tmp-"+hex.EncodeToString(random[:]))
-	file, err := nativeCreate(temp)
+	file, err := nativeCreate(temp, source == nil)
 	if err != nil {
 		return nil, nativeAccess{}, ErrUnsafe
 	}
