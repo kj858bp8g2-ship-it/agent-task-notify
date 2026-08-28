@@ -249,8 +249,9 @@ func mergeJSON(agent string, data []byte, exists bool, previous, desired []owned
 	}
 	object["hooks"], _ = json.Marshal(hooks)
 	out, err := json.Marshal(object)
+	out = append(out, '\n')
 	if err != nil || len(out) > strictjson.MaxBytes {
 		return nil, ErrInvalid
 	}
-	return append(out, '\n'), nil
+	return out, nil
 }

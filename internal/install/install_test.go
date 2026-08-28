@@ -1061,6 +1061,77 @@ func TestLargeProtectedBackupUsesEnvelopeLimitAndExactBytes(t *testing.T) {
 	}
 }
 
+func TestMergedHostFinalByteLimit(t *testing.T) {
+	requireProtection(t)
+	for _, tc := range []struct {
+		name string
+		size int
+	}{
+		{"exact-limit", 4 << 20},
+		{"newline-over-limit", (4 << 20) + 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := setup(t, "cursor", nil)
+			// Hand-build the two Cursor entries to size the input independently
+			// of mergeJSON/renderCommand and include the final newline explicitly.
+			command := "& '" + strings.ReplaceAll(f.options.Executable, "'", "''") + "' 'hook' '--agent' 'cursor' '--data-directory' '" + strings.ReplaceAll(f.repo.Directory(), "'", "''") + "'"
+			encoded, err := json.Marshal(command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prefix := `{"hooks":{"beforeSubmitPrompt":[{"command":` + string(encoded) + `}],"stop":[{"command":` + string(encoded) + `}]},"padding":"`
+			suffix := "\",\"version\":1}\n"
+			padding := strings.Repeat("x", tc.size-len(prefix)-len(suffix))
+			want := []byte(prefix + padding + suffix)
+			original := []byte(`{"padding":"` + padding + `"}`)
+			if len(want) != tc.size || len(original) >= 4<<20 {
+				t.Fatal("boundary fixture is not a sub-limit source")
+			}
+			before, err := hostfile.Read(f.options.ConfigPath, 4<<20)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := hostfile.Replace(f.options.ConfigPath, before, original); err != nil {
+				t.Fatal(err)
+			}
+			p, err := PlanInstall(context.Background(), f.repo, f.options)
+			if tc.size > 4<<20 {
+				if !errors.Is(err, ErrInvalid) {
+					t.Fatal("newline-over-limit replacement not rejected during planning", err)
+				}
+				if ApplyInstall(context.Background(), f.repo, p) == nil {
+					t.Fatal("rejected size preview authorized mutation")
+				}
+				after, err := os.ReadFile(f.options.ConfigPath)
+				if err != nil || !bytes.Equal(after, original) {
+					t.Fatal("oversized merge changed original host")
+				}
+				if _, err := os.Lstat(f.repo.Directory()); !os.IsNotExist(err) {
+					t.Fatal("oversized merge created private state")
+				}
+				return
+			}
+			if err != nil || !bytes.Equal(p.state.replacement, want) {
+				t.Fatal("exact final-byte limit not planned correctly", err)
+			}
+			if err := ApplyInstall(context.Background(), f.repo, p); err != nil {
+				t.Fatal("exact final-byte limit failed activation", err)
+			}
+			after, err := hostfile.Read(p.TargetPath, 4<<20)
+			if err != nil || !bytes.Equal(after.Data, want) || readRecordForTest(t, f)["state"] != "active" {
+				t.Fatal("exact final-byte limit was unreadable or uncommitted", err)
+			}
+			up, err := PlanUninstall(context.Background(), f.repo, "cursor")
+			if err != nil {
+				t.Fatal("boundary activation cannot be uninstalled", err)
+			}
+			if err := ApplyUninstall(context.Background(), f.repo, up); err != nil || readRecordForTest(t, f)["state"] != "inactive" {
+				t.Fatal("boundary uninstall did not commit", err)
+			}
+		})
+	}
+}
+
 func TestExistingEmptyOpenCodeShimIsUnowned(t *testing.T) {
 	f := setup(t, "opencode", nil)
 	path := filepath.Join(f.root, "plugins", "agent-task-notify.js")
