@@ -108,24 +108,7 @@ func TestWindowsUnprotectedInheritedACLAndDigestPreserved(t *testing.T) {
 	if err != nil || len(candidates) != 1 {
 		t.Fatal("stage=unprotected-prediction", predictionDetails(before))
 	}
-	source, err := nativeOpen(path, true)
-	if err != nil {
-		t.Fatal("probe source", err)
-	}
-	defer source.Close()
-	temp, err := nativeCreate(filepath.Join(filepath.Dir(path), "probe-temp"), false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer temp.Close()
-	if err := nativeCopySecurity(source, temp, before.state.access); err != nil {
-		t.Fatal("probe copy", err)
-	}
-	actual, err := nativeMetadata(temp)
-	if err != nil {
-		t.Fatal("probe metadata", err)
-	}
-	t.Logf("stage=unprotected source-control=%x copied-control=%x owner=%t group=%t acl=%t attrs=%t source-length=%d copied-length=%d", before.state.access.control, actual.control, before.state.access.owner == actual.owner, before.state.access.group == actual.group, before.state.access.dacl == actual.dacl, before.state.access.attributes == actual.attributes, len(before.state.access.dacl), len(actual.dacl))
+	assertPredictedTemporary(t, path, before, candidates)
 	if err := Replace(path, before, []byte("new")); err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +519,7 @@ func predictionDetails(s Snapshot) string {
 		}
 	}
 	return fmt.Sprintf("control=%04x attrs=%x policy-present=%t policy-length=%d policy-count=%d policy-type=%d policy-flags=%d readonly=%t residual-policy=%t propagating-policy=%t unconverted-dacl=%t malformed-dacl=%t propagating-dacl=%t",
-		a.control, a.attributes, a.policyPresent, len(a.policy), count, kind, flags, !a.writable(), len(a.policy) <= 8 && (a.policyPresent || a.control&saclControls != 0), flags >= 0 && flags&propagation != 0, a.control&(windows.SE_DACL_PROTECTED|windows.SE_DACL_AUTO_INHERITED) == 0, malformed, propagatingDACL)
+		a.control, a.attributes, a.policyPresent, len(a.policy), count, kind, flags, !a.writable(), len(a.policy) <= 8 && (a.policy != "" || a.policyPresent || a.control&(saclControls & ^windows.SE_SACL_AUTO_INHERITED) != 0), flags >= 0 && flags&propagation != 0, a.control&(windows.SE_DACL_PROTECTED|windows.SE_DACL_AUTO_INHERITED) == 0, malformed, propagatingDACL)
 }
 
 func TestWindowsPredictionDiagnosticDoesNotExposeMetadata(t *testing.T) {
@@ -996,5 +979,58 @@ func TestWindowsClearedLabelControlIsNotR44(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Dir(path))
 	if err != nil || len(entries) != 1 {
 		t.Fatal("failed copy leaked temporary")
+	}
+}
+
+func TestWindowsAbsentPolicyPredictionRetainsOnlyExistingSACLAI(t *testing.T) {
+	bits := []windows.SECURITY_DESCRIPTOR_CONTROL{windows.SE_SACL_PRESENT, windows.SE_SACL_DEFAULTED, windows.SE_SACL_AUTO_INHERIT_REQ, windows.SE_SACL_AUTO_INHERITED, windows.SE_SACL_PROTECTED}
+	for _, dacl := range []string{"D:P", "D:AI"} {
+		base, err := accessFromDescriptor(fixtureDescriptor(t, dacl, false), 0)
+		if err != nil {
+			t.Fatal("fixture descriptor invalid")
+		}
+		for mask := 0; mask < 1<<len(bits); mask++ {
+			var controls windows.SECURITY_DESCRIPTOR_CONTROL
+			for i, bit := range bits {
+				if mask&(1<<i) != 0 {
+					controls |= bit
+				}
+			}
+			for _, form := range []string{"absent", "null", "empty"} {
+				t.Run(fmt.Sprintf("%s/%x/%s", dacl, controls, form), func(t *testing.T) {
+					a := base
+					a.control |= controls
+					a.policyPresent = form != "absent"
+					if form == "empty" {
+						a.policy = "\x02\x00\x08\x00\x00\x00\x00\x00"
+					}
+					want := form == "absent" && (controls == 0 || controls == windows.SE_SACL_AUTO_INHERITED)
+					got, err := nativeExpectedAccess(a, true)
+					if !want {
+						if !errors.Is(err, ErrUnsafe) || len(got) != 0 {
+							t.Fatal("unsupported policy controls predicted")
+						}
+						return
+					}
+					count := 1
+					if dacl == "D:P" {
+						count = 2
+					}
+					if err != nil || len(got) != count {
+						t.Fatal("unchanged absent policy controls not predicted")
+					}
+					for _, candidate := range got {
+						if candidate.control&windows.SE_SACL_AUTO_INHERITED != controls&windows.SE_SACL_AUTO_INHERITED || !preservedAccess(a, candidate) {
+							t.Fatal("candidate changed SACL controls or widened R44")
+						}
+					}
+					changed := a
+					changed.control ^= windows.SE_SACL_AUTO_INHERITED
+					if preservedAccess(a, changed) || preservedAccess(changed, a) || accessDigest(true, a) == accessDigest(true, changed) {
+						t.Fatal("SACL AI change ignored")
+					}
+				})
+			}
+		}
 	}
 }

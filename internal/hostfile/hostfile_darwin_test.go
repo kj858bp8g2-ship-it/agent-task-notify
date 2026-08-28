@@ -3,9 +3,13 @@ package hostfile
 import (
 	"context"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -272,40 +276,83 @@ func TestDarwinNewAccessPredictionUsesCapturedParentGroup(t *testing.T) {
 
 func TestDarwinEmptyACLFlagsAreNotDiscarded(t *testing.T) {
 	path := fixture(t)
-	initial, err := snapshot(t, path).AccessDigest()
+	initial := snapshot(t, path)
+	initialDigest, err := initial.AccessDigest()
 	if err != nil {
 		t.Fatal(err)
+	}
+	// Compile the actual production encoder, not a duplicate test serializer.
+	parsed, err := parser.ParseFile(token.NewFileSet(), "hostfile_darwin.go", nil, parser.ParseComments)
+	if err != nil {
+		t.Fatal("production ACL source unavailable")
+	}
+	var preamble string
+	for _, declaration := range parsed.Decls {
+		imports, ok := declaration.(*ast.GenDecl)
+		if !ok || imports.Tok != token.IMPORT || imports.Doc == nil {
+			continue
+		}
+		for _, spec := range imports.Specs {
+			if spec.(*ast.ImportSpec).Path.Value == `"C"` {
+				preamble = imports.Doc.Text()
+			}
+		}
+	}
+	if preamble == "" {
+		t.Fatal("production ACL preamble unavailable")
 	}
 	dir := hostDirectory(t)
 	source := filepath.Join(dir, "acl-fixture.c")
 	binary := filepath.Join(dir, "acl-fixture")
-	if err := os.WriteFile(source, []byte(darwinEmptyACLFixture), 0600); err != nil {
+	if err := os.WriteFile(source, []byte(preamble+darwinEmptyACLFixture), 0600); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	if err := exec.CommandContext(ctx, "/usr/bin/clang", "-Wall", "-Wextra", "-Werror", source, "-o", binary).Run(); err != nil {
+	if err := exec.CommandContext(ctx, "/usr/bin/clang", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", source, "-o", binary).Run(); err != nil {
 		t.Fatal("fixture compile failed")
 	}
-	out, err := exec.CommandContext(ctx, binary, path).CombinedOutput()
-	if len(out) > 2048 {
-		t.Fatal("fixture diagnostic exceeded bound")
+	run := func(mode string) bool {
+		t.Helper()
+		out, runErr := exec.CommandContext(ctx, binary, mode, path).CombinedOutput()
+		if len(out) > 2048 || !regexp.MustCompile(`\A(?:stage=(?:constructed|post-set-same-fd|fstatx-FILESEC_ACL|reopened|post-replace) status=-?[0-9]{1,6} errno=[0-9]{1,6} present=-?[01] entries=-?[0-9]{1,3} no-inherit=-?[01] defer-inherit=-?[01] serialized-length=-?[0-9]{1,7}\n|stage=codec result=[01]\n|stage=observed persisted=[01]\n)+\z`).Match(out) {
+			t.Fatal("fixture diagnostic schema rejected")
+		}
+		t.Log(string(out))
+		if runErr != nil || strings.Count(string(out), "stage=observed persisted=") != 1 {
+			t.Fatal("fixture ACL observation failed")
+		}
+		return strings.HasSuffix(string(out), "stage=observed persisted=1\n")
 	}
-	t.Log(string(out))
-	if err != nil {
-		t.Fatal("fixture empty ACL flag setup failed")
-	}
+	persisted := run("set")
 	before := snapshot(t, path)
-	flagged, err := before.AccessDigest()
-	if err != nil || flagged == initial {
-		t.Fatal("zero-entry ACL flags discarded")
+	observedDigest, err := before.AccessDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	withoutACL := before.state.access
+	withoutACL.acl = initial.state.access.acl
+	if withoutACL != initial.state.access {
+		t.Fatal("ACL fixture changed unrelated access metadata")
+	}
+	if persisted {
+		if before.state.access.acl == initial.state.access.acl || observedDigest == initialDigest {
+			t.Fatal("persisted zero-entry header not observed")
+		}
+	} else if before.state.access != initial.state.access || observedDigest != initialDigest {
+		t.Fatal("OS absence not represented consistently")
 	}
 	if err := Replace(path, before, []byte("new")); err != nil {
 		t.Fatal(err)
 	}
-	got, err := snapshot(t, path).AccessDigest()
-	if err != nil || got != flagged {
-		t.Fatal("zero-entry ACL flags changed")
+	after := snapshot(t, path)
+	got, err := after.AccessDigest()
+	if err != nil || got != observedDigest || after.state.access != before.state.access {
+		t.Fatal("observed zero-entry access changed")
+	}
+	assertData(t, path, "new")
+	if run("verify") != persisted {
+		t.Fatal("post-replacement native ACL state changed")
 	}
 }
 
@@ -351,49 +398,119 @@ static void report_fd(const char *stage, int fd) {
     report_acl(stage, acl == NULL ? -1 : 0, saved_errno, acl, acl == NULL ? -1 : 1);
     if (acl != NULL) acl_free(acl);
 }
-static void report_filesec(int fd) {
-    errno = 0;
-    filesec_t security = filesec_init();
-    int status = -1, present = -1, saved_errno = errno;
-    acl_t acl = NULL;
-    struct stat st;
-    if (security != NULL) {
-        errno = 0;
-        status = fstatx_np(fd, &st, security);
-        if (status == 0) { errno = 0; status = filesec_query_property(security, FILESEC_ACL, &present); }
-        if (status == 0 && present) { errno = 0; status = filesec_get_property(security, FILESEC_ACL, &acl); }
-        saved_errno = errno;
-        filesec_free(security);
-    }
-    report_acl("fstatx-FILESEC_ACL", status, saved_errno, acl, present);
+static int empty_header(acl_t acl, int no_inherit) {
+    acl_entry_t entry;
+    acl_flagset_t flags;
+    return acl != NULL && acl_valid(acl) == 0 &&
+        acl_get_entry(acl, ACL_FIRST_ENTRY, &entry) == -1 &&
+        acl_get_flagset_np(acl, &flags) == 0 &&
+        acl_get_flag_np(flags, ACL_FLAG_NO_INHERIT) == no_inherit &&
+        acl_get_flag_np(flags, ACL_FLAG_DEFER_INHERIT) == 0;
+}
+// Independent native encoding is the oracle for the production encoder.
+// Neither this byte buffer nor any ACL/GUID is written to stdout or a file.
+static int matches_acl(acl_t acl, const char *expected, ssize_t length) {
+    if (acl == NULL || length <= 0 || length > 1048576 || acl_size(acl) != length) return 0;
+    char *actual = calloc(1, (size_t)length);
+    if (actual == NULL) return 0;
+    int ok = acl_copy_ext(actual, acl, length) == length && memcmp(actual, expected, (size_t)length) == 0;
+    free(actual);
+    return ok;
+}
+static int roundtrip_header(const char *data, ssize_t length, int no_inherit) {
+    acl_t acl = acl_copy_int(data);
+    int ok = empty_header(acl, no_inherit) && matches_acl(acl, data, length);
     if (acl != NULL) acl_free(acl);
+    return ok;
+}
+// Only successful fstatx can establish absence. Also check the independent
+// get-fd result and the production host_acl encoding against that observation.
+static int classify_fd(const char *stage, int fd, const char *plain, ssize_t plain_length,
+                       const char *flagged, ssize_t flagged_length) {
+    filesec_t security = filesec_init();
+    if (security == NULL) return -1;
+    struct stat st;
+    int present = -1;
+    acl_t acl = NULL;
+    errno = 0;
+    int ok = fstatx_np(fd, &st, security) == 0 &&
+        filesec_get_property(security, FILESEC_OWNER, NULL) == 0 &&
+        filesec_get_property(security, FILESEC_GROUP, NULL) == 0 &&
+        filesec_get_property(security, FILESEC_MODE, NULL) == 0 &&
+        filesec_query_property(security, FILESEC_ACL, &present) == 0 &&
+        (present == 0 || present == 1);
+    if (ok && present) ok = filesec_get_property(security, FILESEC_ACL, &acl) == 0;
+    int saved_errno = errno;
+    filesec_free(security);
+    if (stage != NULL) report_acl(stage, ok ? 0 : -1, saved_errno, acl, present);
+    if (ok && present) ok = empty_header(acl, 1) && matches_acl(acl, flagged, flagged_length);
+    if (acl != NULL) acl_free(acl);
+    if (!ok) return -1;
+    errno = 0;
+    acl = acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
+    saved_errno = errno;
+    ok = present ? empty_header(acl, 1) && matches_acl(acl, flagged, flagged_length) :
+        acl == NULL && saved_errno == ENOENT;
+    if (acl != NULL) acl_free(acl);
+    if (!ok) return -1;
+    char *actual = NULL;
+    ssize_t length = 0;
+    const char *expected = present ? flagged : plain;
+    ssize_t expected_length = present ? flagged_length : plain_length;
+    ok = host_acl(fd, &actual, &length) == 1 && length == expected_length &&
+        memcmp(actual, expected, (size_t)length) == 0;
+    free(actual);
+    return ok ? present : -1;
 }
 int main(int argc, char **argv) {
-    if (argc != 2) return 2;
-    int fd = open(argv[1], O_RDWR|O_NOFOLLOW|O_CLOEXEC);
-    if (fd < 0) return 3;
-    struct stat st;
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid()) { close(fd); return 4; }
-    acl_t acl = acl_init(0);
+    if (argc != 3 || (strcmp(argv[1], "set") != 0 && strcmp(argv[1], "verify") != 0)) return 2;
+    int setting = strcmp(argv[1], "set") == 0;
+    int result = 3, fd = -1;
+    char *plain = NULL, *flagged = NULL;
+    ssize_t plain_length = 0, flagged_length = 0;
+    acl_t acl = acl_init(0), empty = acl_init(0);
     acl_flagset_t flags;
-    if (acl == NULL) { close(fd); return 5; }
-    errno = 0;
-    int ok = acl_get_flagset_np(acl, &flags) == 0 &&
-        acl_add_flag_np(flags, ACL_FLAG_NO_INHERIT) == 0;
-    report_acl("constructed", ok ? 0 : -1, errno, acl, 1);
-    errno = 0;
-    ok = ok && acl_set_fd_np(fd, acl, ACL_TYPE_EXTENDED) == 0;
-    int set_errno = errno;
-    acl_free(acl);
-    if (!ok) { report_acl("post-set-same-fd", -1, set_errno, NULL, -1); close(fd); return 6; }
-    report_fd("post-set-same-fd", fd);
-    report_filesec(fd);
-    close(fd);
-    fd = open(argv[1], O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
-    if (fd < 0) { report_acl("reopened", -1, errno, NULL, -1); return 7; }
-    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid()) { close(fd); return 8; }
-    report_fd("reopened", fd);
-    close(fd);
-    return 0;
+    if (acl == NULL || empty == NULL) goto done;
+    int ok = acl_get_flagset_np(acl, &flags) == 0 && acl_add_flag_np(flags, ACL_FLAG_NO_INHERIT) == 0 &&
+        host_encode_acl(acl_dup(acl), &flagged, &flagged_length) == 1 &&
+        host_empty_acl(&plain, &plain_length) == 1 &&
+        matches_acl(acl, flagged, flagged_length) && matches_acl(empty, plain, plain_length) &&
+        roundtrip_header(flagged, flagged_length, 1) && roundtrip_header(plain, plain_length, 0) &&
+        (plain_length != flagged_length || memcmp(plain, flagged, (size_t)plain_length) != 0);
+    printf("stage=codec result=%d\n", ok);
+    if (!ok) goto done;
+    fd = open(argv[2], (setting ? O_RDWR : O_RDONLY)|O_NOFOLLOW|O_CLOEXEC);
+    if (fd < 0) goto done;
+    struct stat st;
+    if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid()) goto done;
+    if (setting) {
+        report_acl("constructed", 0, 0, acl, 1);
+        errno = 0;
+        if (acl_set_fd_np(fd, acl, ACL_TYPE_EXTENDED) != 0) {
+            report_acl("post-set-same-fd", -1, errno, NULL, -1);
+            goto done;
+        }
+        report_fd("post-set-same-fd", fd);
+    }
+    int present = classify_fd(setting ? "fstatx-FILESEC_ACL" : "post-replace", fd,
+                              plain, plain_length, flagged, flagged_length);
+    if (present < 0) goto done;
+    if (setting) {
+        close(fd);
+        fd = open(argv[2], O_RDONLY|O_NOFOLLOW|O_CLOEXEC);
+        if (fd < 0) goto done;
+        if (fstat(fd, &st) != 0 || !S_ISREG(st.st_mode) || st.st_uid != geteuid()) goto done;
+        report_fd("reopened", fd);
+        if (classify_fd(NULL, fd, plain, plain_length, flagged, flagged_length) != present) goto done;
+    }
+    printf("stage=observed persisted=%d\n", present);
+    result = 0;
+done:
+    if (fd >= 0) close(fd);
+    if (acl != NULL) acl_free(acl);
+    if (empty != NULL) acl_free(empty);
+    free(plain);
+    free(flagged);
+    return result;
 }
 `

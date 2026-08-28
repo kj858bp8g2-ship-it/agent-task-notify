@@ -66,6 +66,7 @@ func TestAccessDigestsPredictNativeReplacementAndRemoval(t *testing.T) {
 		if err != nil || len(entriesBefore) != len(entriesAfter) {
 			t.Fatal("digest methods wrote files")
 		}
+		assertPredictedTemporary(t, path, before, candidates)
 		if err := Replace(path, before, []byte("replacement")); err != nil {
 			t.Fatal(err)
 		}
@@ -88,6 +89,55 @@ func TestAccessDigestsPredictNativeReplacementAndRemoval(t *testing.T) {
 		if actual == removed {
 			t.Fatal("existence missing from digest")
 		}
+	}
+}
+
+// Exercise the real empty create/copy/readback before any replacement bytes.
+// This is deliberately separate from prediction: observed source controls do
+// not prove that the OS will retain them on a newly created temporary.
+func assertPredictedTemporary(t *testing.T, path string, before Snapshot, candidates []string) {
+	t.Helper()
+	tempPath := filepath.Join(filepath.Dir(path), "prediction-temp")
+	temp, err := nativeCreate(tempPath, !before.state.exists)
+	if err != nil {
+		t.Fatal("stage=predicted-temp-create failed")
+	}
+	identity, err := temp.Stat()
+	if err != nil {
+		temp.Close()
+		t.Fatal("stage=predicted-temp-stat failed")
+	}
+	defer func() { temp.Close(); cleanupTemporary(tempPath, identity) }()
+	if identity.Size() != 0 {
+		t.Fatal("stage=predicted-temp-create not-empty")
+	}
+	if before.state.exists {
+		source, err := nativeOpen(path, true)
+		if err != nil {
+			t.Fatal("stage=predicted-temp-source failed")
+		}
+		defer source.Close()
+		if err := nativeCopySecurity(source, temp, before.state.access); err != nil {
+			t.Fatal("stage=predicted-temp-copy failed")
+		}
+	}
+	actual, err := nativeMetadata(temp)
+	if err != nil {
+		t.Fatal("stage=predicted-temp-readback failed")
+	}
+	info, err := temp.Stat()
+	if err != nil || info.Size() != 0 {
+		t.Fatal("stage=predicted-temp-copy not-empty")
+	}
+	want := before.state.newAccess
+	if before.state.exists {
+		want = before.state.access
+	}
+	allowed := actual == want || before.state.exists && preservedAccess(want, actual)
+	t.Logf("stage=predicted-temp-source %s", predictionDetails(Snapshot{state: &observation{exists: true, access: want}}))
+	t.Logf("stage=predicted-temp-readback preserved=%t %s", allowed, predictionDetails(Snapshot{state: &observation{exists: true, access: actual}}))
+	if !allowed || !slices.Contains(candidates, accessDigest(true, actual)) {
+		t.Fatal("stage=predicted-temp-access mismatch")
 	}
 }
 

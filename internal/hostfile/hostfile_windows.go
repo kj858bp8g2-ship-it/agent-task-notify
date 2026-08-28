@@ -105,10 +105,12 @@ func nativeExpectedAccess(access nativeAccess, existing bool) ([]nativeAccess, e
 	}
 	if existing {
 		const saclControls = windows.SE_SACL_PRESENT | windows.SE_SACL_DEFAULTED | windows.SE_SACL_AUTO_INHERIT_REQ | windows.SE_SACL_AUTO_INHERITED | windows.SE_SACL_PROTECTED
-		if (len(access.policy) <= 8 && (access.policyPresent || access.control&saclControls != 0)) ||
+		if (len(access.policy) <= 8 && (access.policy != "" || access.policyPresent || access.control&(saclControls & ^windows.SE_SACL_AUTO_INHERITED) != 0)) ||
 			(len(access.policy) > 8 && access.policy[9]&(windows.OBJECT_INHERIT_ACE|windows.CONTAINER_INHERIT_ACE|windows.INHERIT_ONLY_ACE|windows.NO_PROPAGATE_INHERIT_ACE) != 0) {
-			// No label copy can reproduce residual SACL controls, and regular
-			// file propagation flags may be rewritten. Do not predict either.
+			// Absent policy may retain SACL_AI unchanged, but no other residual
+			// policy controls are supported. The actual temp must still match;
+			// this never permits a SACL bit transition or an extra candidate.
+			// Regular-file propagation flags may be rewritten, so refuse them.
 			return nil, ErrUnsafe
 		}
 		if access.control&(windows.SE_DACL_PROTECTED|windows.SE_DACL_AUTO_INHERITED) == 0 {
