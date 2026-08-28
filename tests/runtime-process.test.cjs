@@ -103,6 +103,35 @@ function retryCapFailure(error,rawJobs,rawRequestElapsedMs,rawElapsedMs) {
   return new Error(`${durableStateTimeoutMessage}; retry-cap-snapshot=${JSON.stringify(retryCapSnapshot(rawJobs,rawRequestElapsedMs,rawElapsedMs))}`);
 }
 
+const durableWaitPhases=new Set(['retry-cap','extension','permanent']);
+const durableExtensionStatus=new Set(['none','pending','sending','sent','failed','ambiguous']);
+const durableExtensionDiagnostic=new Set([...retryCapDiagnostic,'ambiguous-extension','transport','malformed-response']);
+function durableWaitSnapshot(phase,rawJobs,rawRequestElapsedMs,rawElapsedMs) {
+  const base=retryCapSnapshot(rawJobs,rawRequestElapsedMs,rawElapsedMs);
+  return {
+    ...base,phase:durableWaitPhases.has(phase)?phase:'other',
+    jobs:base.jobs.map((job,index)=>({
+      ...job,
+      extensionStatus:durableExtensionStatus.has(rawJobs[index]?.extensionStatus)?rawJobs[index].extensionStatus:'unknown',
+      extensionDiagnostic:rawJobs[index]?.extensionDiagnostic==null||rawJobs[index].extensionDiagnostic===''?'none':durableExtensionDiagnostic.has(rawJobs[index].extensionDiagnostic)?rawJobs[index].extensionDiagnostic:'other'
+    }))
+  };
+}
+function durableWaitFailure(error,phase,rawJobs,rawRequestElapsedMs,rawElapsedMs) {
+  if(error?.code!==durableStateTimeoutCode||error.message!==durableStateTimeoutMessage)return error;
+  if(phase==='retry-cap')return retryCapFailure(error,rawJobs,rawRequestElapsedMs,rawElapsedMs);
+  return Object.assign(new Error(`${durableStateTimeoutMessage}; durable-wait-snapshot=${JSON.stringify(durableWaitSnapshot(phase,rawJobs,rawRequestElapsedMs,rawElapsedMs))}`),{code:durableStateTimeoutCode});
+}
+async function observedDurableWait(read,predicate,timeout,phase,requestTimes,startedAt) {
+  let last=[];
+  try {return await eventually(async()=>{const value=await read();last=value;return value;},predicate,timeout);}
+  catch(error) {
+    if(error?.code!==durableStateTimeoutCode||error.message!==durableStateTimeoutMessage)throw error;
+    // Never add a diagnostic filesystem read that can mask this timeout.
+    throw durableWaitFailure(error,phase,last,requestTimes().map(at=>at-startedAt),Date.now()-startedAt);
+  }
+}
+
 test('retry-cap diagnostic snapshot is fixed-schema, bounded, and redacted',()=> {
   const snapshot=retryCapSnapshot([
     {status:'PRIVATE-pending',attempts:-4,diagnostic:'https://private.example/secret',jobKey:'PRIVATE_JOB_KEY'},
@@ -137,6 +166,53 @@ test('retry-cap diagnostic decorates only the durable-state timeout',()=> {
 test('retry-cap diagnostic distinguishes no diagnostic and fixed startup failures',()=> {
   const diagnostics=[null,'','spawn-failed','credential','worker-error','ambiguous-send','PRIVATE_FAILURE'];
   assert.deepEqual(diagnostics.map(diagnostic=>retryCapSnapshot([{status:'pending',attempts:0,diagnostic}],[],0).jobs[0].diagnostic),['none','none','spawn-failed','credential','worker-error','ambiguous-send','other']);
+});
+
+test('durable-wait diagnostic phases bound and redact extension state',()=> {
+  const raw=[{status:'sent',attempts:99,diagnostic:null,extensionStatus:'sending',extensionDiagnostic:'ambiguous-extension',key:'PRIVATE_ID',body:'PRIVATE_BODY'},
+    {status:'PRIVATE_STATUS',attempts:-1,diagnostic:'https://PRIVATE/TOKEN',extensionStatus:'PRIVATE_EXTENSION',extensionDiagnostic:'PRIVATE_PATH'}];
+  for(const phase of ['extension','permanent','PRIVATE_PHASE']) {
+    const snapshot=durableWaitSnapshot(phase,raw,[1,999999,-1,2,3,4,5],Infinity);
+    assert.deepEqual(snapshot,{
+      schemaVersion:1,phase:phase==='PRIVATE_PHASE'?'other':phase,jobCount:2,
+      jobs:[{status:'sent',attempts:5,diagnostic:'none',extensionStatus:'sending',extensionDiagnostic:'ambiguous-extension'},
+        {status:'unknown',attempts:0,diagnostic:'other',extensionStatus:'unknown',extensionDiagnostic:'other'}],
+      requestCount:6,requestElapsedMs:[1,180000,0,2,3,4],elapsedMs:0
+    });
+    assert.doesNotMatch(JSON.stringify(snapshot),/PRIVATE|https|TOKEN|body|key/);
+  }
+  for(const status of ['none','pending','sending','sent','failed','ambiguous']) {
+    assert.equal(durableWaitSnapshot('extension',[{extensionStatus:status}],[],0).jobs[0].extensionStatus,status);
+  }
+});
+
+test('durable-wait diagnostics preserve cap format and unknown error identity',()=> {
+  const timeout=Object.assign(new Error(durableStateTimeoutMessage),{code:durableStateTimeoutCode});
+  assert.equal(durableWaitFailure(timeout,'retry-cap',[],[],0).message,retryCapFailure(timeout,[],[],0).message);
+  for(const phase of ['extension','permanent']) {
+    const decorated=durableWaitFailure(timeout,phase,[],[],0);
+    assert.match(decorated.message,new RegExp(`"phase":"${phase}"`));
+    assert.equal(decorated.code,durableStateTimeoutCode);
+    for(const error of [new SyntaxError('PRIVATE_PARSE'),Object.assign(new Error('PRIVATE_MESSAGE'),{code:durableStateTimeoutCode}),Object.assign(new Error(durableStateTimeoutMessage),{code:'PRIVATE_CODE'})]) {
+      assert.equal(durableWaitFailure(error,phase,[],[],0),error);
+    }
+  }
+});
+
+test('durable-wait observer decorates only timeout from last successful read',async()=> {
+  let reads=0,timings=0;
+  const read=async()=>{reads++;if(reads===2)throw Object.assign(new Error(durableStateTimeoutMessage),{code:durableStateTimeoutCode});return [{status:'sent',attempts:1,extensionStatus:'pending',extensionDiagnostic:null}];};
+  await assert.rejects(observedDurableWait(read,()=>false,15000,'extension',()=>{timings++;return [Date.now()];},Date.now()),error=>{
+    assert.equal(error.code,durableStateTimeoutCode);
+    assert.match(error.message,/"phase":"extension"/);
+    assert.match(error.message,/"extensionStatus":"pending"/);
+    return true;
+  });
+  assert.equal(reads,2,'A timeout must not perform an additional diagnostic read');assert.equal(timings,1);
+  const failure=new SyntaxError('PRIVATE_READ_ERROR');
+  await assert.rejects(observedDurableWait(async()=>{throw failure;},()=>false,15000,'permanent',()=>{throw new Error('diagnostic must not run');},Date.now()),error=>error===failure);
+  const wanted=[{status:'failed'}];
+  assert.equal(await observedDurableWait(async()=>wanted,()=>true,15000,'permanent',()=>{throw new Error('success must not read timings');},Date.now()),wanted);
 });
 
 test('lock setup timeout closes before temporary directory removal',{timeout:15000},async t=> {
@@ -272,13 +348,14 @@ test('real hook strictly decodes UTF-8, detaches handles, retries and extends a 
     await hook(directory,input);await delay(1100);
     const expectedSessionKey=createHash('sha256').update('["codex","合成会话🙂"]','utf8').digest('hex');
     assert.ok((await fs.readdir(path.join(directory,'sessions'))).includes(expectedSessionKey+'.json'),'Identity hashes correctly decoded Unicode, not consistent mojibake');
+    const extensionStartedAt=Date.now();
     const ended=await hook(directory,{...input,hook_event_name:'Stop'});
     const pending=(await eventually(()=>jobs(directory),j=>j.length===1))[0];
     // Additional workers run while the first worker owns the durable job lock.
     const duplicates=await Promise.all([0,1].map(()=>processRun(['-NoProfile','-File',entry,'-Mode','Worker','-DataDirectory',directory,'-JobKey',pending.key])));
     for(const duplicate of duplicates)assert.equal(duplicate.code,0,duplicate.err);
     await fs.writeFile(path.join(directory,'settings.json'),JSON.stringify({provider:'ntfy',minSeconds:999,longTaskSeconds:2000,sound:'changed',continuous:false}));
-    const done=(await eventually(()=>jobs(directory),j=>j[0]?.extensionStatus==='sent',25000))[0];
+    const done=(await observedDurableWait(()=>jobs(directory),j=>j[0]?.extensionStatus==='sent',25000,'extension',()=>received.map(request=>request.at),extensionStartedAt))[0];
     assert.equal(done.status,'sent');assert.equal(done.attempts,2);assert.equal(received.length,3);
     assert.ok(ended.closedAt-ended.exitedAt<1000,'Worker must not hold Hook stdout open');
     assert.ok(received[1].at>ended.closedAt,'Worker remains alive after Hook stdout closes');
@@ -311,18 +388,14 @@ test('real worker reaches five-attempt cap and permanent rejection never retries
     await script(`Import-Module ./src/Storage.psm1; Write-ATNJson ${quote(path.join(directory,'settings.json'))} @{minSeconds=1;longTaskSeconds=2;continuous=$false}; Set-ATNCredential ${quote(directory)} bark @{endpoint='http://127.0.0.1:${server.address().port}/synthetic-key'}`);
     const input={hook_event_name:'UserPromptSubmit',session_id:'synthetic-session',turn_id:'retry-cap'};
     await hook(directory,input);await delay(1100);const retryCapStartedAt=Date.now();await hook(directory,{...input,hook_event_name:'Stop'});
-    let done;
-    try { done=(await eventually(()=>jobs(directory),j=>j[0]?.status==='failed',130000))[0]; }
-    catch(error) {
-      if(error?.code!==durableStateTimeoutCode||error.message!==durableStateTimeoutMessage)throw error;
-      throw retryCapFailure(error,await jobs(directory),requests.map(at=>at-retryCapStartedAt),Date.now()-retryCapStartedAt);
-    }
+    const done=(await observedDurableWait(()=>jobs(directory),j=>j[0]?.status==='failed',130000,'retry-cap',()=>requests,retryCapStartedAt))[0];
     assert.equal(done.attempts,5);assert.equal(done.diagnostic,'http:503');assert.equal(requests.length,5);
     for(const [i,min] of [[1,4800],[2,14800],[3,29800],[4,59800]])assert.ok(requests[i]-requests[i-1]>=min);
     const again=await processRun(['-NoProfile','-File',entry,'-Mode','Worker','-DataDirectory',directory,'-JobKey',done.key]);assert.equal(again.code,1);assert.equal(requests.length,5);
     status=400;
+    const permanentStartedAt=Date.now();
     await hook(directory,{...input,turn_id:'permanent'});await delay(1100);await hook(directory,{...input,turn_id:'permanent',hook_event_name:'Stop'});
-    const all=await eventually(()=>jobs(directory),j=>j.length===2&&j.every(x=>x.status==='failed'));
+    const all=await observedDurableWait(()=>jobs(directory),j=>j.length===2&&j.every(x=>x.status==='failed'),15000,'permanent',()=>requests,permanentStartedAt);
     assert.equal(all.find(j=>j.key!==done.key).attempts,1);assert.equal(requests.length,6);
   } finally { await new Promise(resolve=>server.close(resolve));await fs.rm(directory,{recursive:true,force:true}); }
 });

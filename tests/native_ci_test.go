@@ -2,14 +2,122 @@ package tests
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 )
+
+func TestNativeCIDiagnosticProjectionBoundsAndRedaction(t *testing.T) {
+	for _, c := range []struct{ line, kind, want string }{
+		{"create-keychain -p SECRET /PRIVATE/synthetic.keychain-db", "security", "create"},
+		{"set-keychain-settings -lut 3600 /PRIVATE/synthetic.keychain-db", "security", "settings"},
+		{"unlock-keychain -p SECRET /PRIVATE/synthetic.keychain-db", "security", "unlock"},
+		{"list-keychains -d user", "security", "search-read"},
+		{"default-keychain -d user", "security", "default-read"},
+		{"list-keychains -d user -s /PRIVATE/synthetic.keychain-db", "security", "search-set"},
+		{"default-keychain -d user -s /PRIVATE/synthetic.keychain-db", "security", "default-set"},
+		{"default-keychain -d user -s old-default.keychain-db", "security", "default-restore"},
+		{"list-keychains -d user -s old-search.keychain-db", "security", "search-restore"},
+		{"delete-keychain /PRIVATE/synthetic.keychain-db", "security", "delete"},
+		{"cleanup-rm -rf -- /PRIVATE/atn-keychain.abcdefgh", "security", "cleanup-fixture"},
+		{"cleanup-rm -rf -- /PRIVATE/atn-go-tmp.abcdefgh", "security", "cleanup-tmp"},
+		{"test -count=1 -v -timeout=45s -run ^TestDarwinRejectsIncompleteFileSecurity$ ./internal/store", "go", "counterfactual"},
+		{"test -p 1 -count=1 -v ./...", "go", "suite"},
+		{"https://PRIVATE/TOKEN BODY", "security", "other"},
+		{"test -p PRIVATE ./...", "go", "other"},
+	} {
+		path := filepath.Join(t.TempDir(), "synthetic.log")
+		if err := os.WriteFile(path, []byte(c.line+"\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		got := nativeCILogSnapshot(path, c.kind)
+		if got.ReadCategory != "read" || got.Count != 1 || got.Truncated || got.LastCall != c.want {
+			t.Fatalf("unexpected fixed log projection: %+v", got)
+		}
+		encoded, _ := json.Marshal(got)
+		if strings.Contains(string(encoded), "PRIVATE") || strings.Contains(string(encoded), "SECRET") || strings.Contains(string(encoded), "https") {
+			t.Fatal("diagnostic leaked synthetic data")
+		}
+	}
+	path := filepath.Join(t.TempDir(), "synthetic.log")
+	if err := os.WriteFile(path, []byte(strings.Repeat("PRIVATE\n", 1000)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got := nativeCILogSnapshot(path, "security")
+	if got.Count != 64 || !got.Truncated || got.LastCall != "other" {
+		t.Fatal("line count unbounded")
+	}
+	if err := os.WriteFile(path, []byte(strings.Repeat("PRIVATE", 20000)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got = nativeCILogSnapshot(path, "security")
+	if !got.Truncated || got.Count > 64 {
+		t.Fatal("byte read unbounded")
+	}
+	if got := nativeCILogSnapshot(path+"-missing", "go"); got.ReadCategory != "missing" || got.Count != 0 {
+		t.Fatal("missing log not classified")
+	}
+	if got := nativeCILogSnapshot(t.TempDir(), "go"); got.ReadCategory != "unavailable" {
+		t.Fatal("non-file log accepted")
+	}
+	if got := nativeCIDuration(99 * time.Hour); got != 60000 {
+		t.Fatal("elapsed duration unbounded")
+	}
+	if got := nativeCIDuration(-time.Second); got != 0 {
+		t.Fatal("negative duration")
+	}
+}
+
+func TestNativeCIDiagnosticTimeoutAndFailedProcess(t *testing.T) {
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		t.Fatal("bash required")
+	}
+	log := filepath.Join(t.TempDir(), "synthetic.log")
+	if err := os.WriteFile(log, []byte("default-keychain -d user -s old-default.keychain-db\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Already-expired context is deterministic without a startup timing SLA or
+	// a live shell/descendant. A separate builtin-only failure verifies collection.
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bash, "-c", "exit 73")
+	_, err, observed := observeNativeCICommand(ctx, cmd, map[string]string{"ATN_FAKE_SECURITY_LOG": log})
+	if err == nil || !observed.TimedOut || observed.ProcessStarted || !observed.ProcessCompleted || observed.ProcessCategory != "not-started" || observed.Security.LastCall != "default-restore" {
+		t.Fatalf("timeout observation: %+v", observed)
+	}
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel2()
+	cmd = exec.CommandContext(ctx2, bash, "-c", "printf PRIVATE_OUTPUT; exit 73")
+	_, err, observed = observeNativeCICommand(ctx2, cmd, nil)
+	var exited *exec.ExitError
+	if !errors.As(err, &exited) || exited.ExitCode() != 73 || observed.TimedOut || !observed.ProcessStarted || !observed.ProcessCompleted || observed.ProcessCategory != "exit" || !observed.OutputPresent {
+		t.Fatalf("failure observation: %+v", observed)
+	}
+	encoded, _ := json.Marshal(observed)
+	if strings.Contains(string(encoded), "PRIVATE") || strings.Contains(string(encoded), bash) {
+		t.Fatal("process diagnostic disclosed output/path")
+	}
+	var shape map[string]json.RawMessage
+	if json.Unmarshal(encoded, &shape) != nil {
+		t.Fatal("diagnostic JSON")
+	}
+	keys := map[string]bool{}
+	for key := range shape {
+		keys[key] = true
+	}
+	want := map[string]bool{"schemaVersion": true, "timedOut": true, "processStarted": true, "processCompleted": true, "processCategory": true, "outputPresent": true, "elapsedMs": true, "security": true, "go": true}
+	if !reflect.DeepEqual(keys, want) {
+		t.Fatal("unexpected diagnostic fields")
+	}
+}
 
 func TestNativeCIScriptRefusesBeforeSecurityCommand(t *testing.T) {
 	runnerTemp := t.TempDir()
@@ -566,9 +674,10 @@ fi
 	for key, value := range extra {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
-	output, err := cmd.CombinedOutput()
-	if ctx.Err() != nil {
-		t.Fatalf("native CI script exceeded bounded test timeout: %v", ctx.Err())
+	output, err, observed := observeNativeCICommand(ctx, cmd, extra)
+	if observed.TimedOut {
+		encoded, _ := json.Marshal(observed)
+		t.Fatalf("native CI script exceeded bounded test timeout; native-ci-snapshot=%s", encoded)
 	}
 	if err == nil {
 		return 0, string(output)
@@ -578,6 +687,143 @@ fi
 	}
 	t.Fatal(err)
 	return -1, ""
+}
+
+type nativeCILogObservation struct {
+	ReadCategory string `json:"readCategory"`
+	Count        int    `json:"count"`
+	Truncated    bool   `json:"truncated"`
+	LastCall     string `json:"lastCall"`
+}
+
+type nativeCIObservation struct {
+	SchemaVersion    int                    `json:"schemaVersion"`
+	TimedOut         bool                   `json:"timedOut"`
+	ProcessStarted   bool                   `json:"processStarted"`
+	ProcessCompleted bool                   `json:"processCompleted"`
+	ProcessCategory  string                 `json:"processCategory"`
+	OutputPresent    bool                   `json:"outputPresent"`
+	ElapsedMs        int64                  `json:"elapsedMs"`
+	Security         nativeCILogObservation `json:"security"`
+	Go               nativeCILogObservation `json:"go"`
+}
+
+func nativeCIDuration(elapsed time.Duration) int64 { return min(60000, max(0, elapsed.Milliseconds())) }
+
+// Completion means CombinedOutput/Wait collection returned, not success. The
+// existing command, cancellation and five-second budget are deliberately intact.
+func observeNativeCICommand(ctx context.Context, cmd *exec.Cmd, extra map[string]string) ([]byte, error, nativeCIObservation) {
+	started := time.Now()
+	output, err := cmd.CombinedOutput()
+	observed := nativeCIObservation{SchemaVersion: 1, TimedOut: ctx.Err() == context.DeadlineExceeded, ProcessStarted: cmd.Process != nil, ProcessCompleted: true, ProcessCategory: "not-started", OutputPresent: len(output) > 0, ElapsedMs: nativeCIDuration(time.Since(started))}
+	if cmd.ProcessState != nil {
+		if cmd.ProcessState.Success() {
+			observed.ProcessCategory = "success"
+		} else if cmd.ProcessState.Exited() {
+			observed.ProcessCategory = "exit"
+		} else {
+			observed.ProcessCategory = "signaled"
+		}
+	}
+	// Sample the deadline immediately after collection. Diagnostic I/O must not
+	// turn a process that completed within its budget into a timeout afterward.
+	observed.Security = nativeCILogObservation{ReadCategory: "missing", LastCall: "none"}
+	observed.Go = nativeCILogObservation{ReadCategory: "missing", LastCall: "none"}
+	if observed.TimedOut {
+		observed.Security = nativeCILogSnapshot(extra["ATN_FAKE_SECURITY_LOG"], "security")
+		observed.Go = nativeCILogSnapshot(extra["ATN_FAKE_GO_LOG"], "go")
+	}
+	return output, err, observed
+}
+
+// Only test-owned fake-command logs are supplied. Limit the actual read, and
+// count at most64 lines; no raw log line, path, command or output is returned.
+func nativeCILogSnapshot(path, kind string) nativeCILogObservation {
+	result := nativeCILogObservation{ReadCategory: "missing", LastCall: "none"}
+	if path == "" {
+		return result
+	}
+	f, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return result
+	}
+	if err != nil {
+		result.ReadCategory = "unavailable"
+		return result
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		result.ReadCategory = "unavailable"
+		return result
+	}
+	const limit = 64 * 1024
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		result.ReadCategory = "unavailable"
+		return result
+	}
+	result.ReadCategory = "read"
+	if len(data) > limit {
+		result.Truncated = true
+		data = data[:limit]
+	}
+	text := strings.TrimSuffix(string(data), "\n")
+	if text == "" {
+		return result
+	}
+	lines := strings.SplitN(text, "\n", 65)
+	if len(lines) > 64 {
+		result.Truncated = true
+		lines = lines[:64]
+	}
+	for _, line := range lines {
+		result.Count++
+		result.LastCall = nativeCILastCall(strings.TrimSuffix(line, "\r"), kind)
+	}
+	return result
+}
+
+// A logged invocation is not evidence that the invocation completed.
+func nativeCILastCall(line, kind string) string {
+	if kind == "go" {
+		switch line {
+		case "test -count=1 -v -timeout=45s -run ^TestDarwinRejectsIncompleteFileSecurity$ ./internal/store":
+			return "counterfactual"
+		case "test -p 1 -count=1 -v ./...":
+			return "suite"
+		default:
+			return "other"
+		}
+	}
+	if kind != "security" {
+		return "other"
+	}
+	switch line {
+	case "list-keychains -d user":
+		return "search-read"
+	case "default-keychain -d user":
+		return "default-read"
+	case "list-keychains -d user -s old-search.keychain-db":
+		return "search-restore"
+	case "default-keychain -d user -s old-default.keychain-db":
+		return "default-restore"
+	}
+	for _, pair := range [][2]string{{"create-keychain ", "create"}, {"set-keychain-settings ", "settings"}, {"unlock-keychain ", "unlock"}, {"list-keychains -d user -s ", "search-set"}, {"default-keychain -d user -s ", "default-set"}, {"delete-keychain ", "delete"}} {
+		if strings.HasPrefix(line, pair[0]) {
+			return pair[1]
+		}
+	}
+	if target, ok := strings.CutPrefix(line, "cleanup-rm -rf -- "); ok {
+		base := filepath.Base(target)
+		if strings.HasPrefix(base, "atn-keychain.") {
+			return "cleanup-fixture"
+		}
+		if strings.HasPrefix(base, "atn-go-tmp.") {
+			return "cleanup-tmp"
+		}
+	}
+	return "other"
 }
 
 func withoutNativeCIEnvironment(env []string) []string {
