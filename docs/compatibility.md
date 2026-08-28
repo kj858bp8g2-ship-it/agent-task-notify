@@ -1,4 +1,8 @@
-# Compatibility
+# Compatibility routes
+
+The NEW native `0.2.0-rc.1` candidate has its own [compatibility/evidence matrix](native-compatibility.md) and [exact-source validation record](native-validation.md). Mac and Android are experimental, and historical legacy phone/host evidence below does not validate the native candidate.
+
+## Legacy Windows evidence
 
 Contract sources below were checked on 2026-08-27. They establish adapter shape only; they do not establish a supported host version or real-host loading unless noted.
 

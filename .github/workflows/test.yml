@@ -1,5 +1,10 @@
 name: test
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  workflow_call:
+permissions:
+  contents: read
 jobs:
   offline:
     runs-on: windows-latest

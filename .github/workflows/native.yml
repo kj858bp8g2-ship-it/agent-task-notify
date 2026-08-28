@@ -4,8 +4,10 @@ on:
   push:
     branches:
       - feature/native-*
+      - main
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 permissions:
   contents: read
@@ -61,7 +63,9 @@ jobs:
         env:
           ATN_PACKAGE_DIAGNOSTICS: ${{ runner.os == 'Windows' && '1' || '' }}
         run: |
-          $candidate = Join-Path $env:RUNNER_TEMP 'atn-native-archive'
+          $parent = if ($env:RUNNER_OS -eq 'Windows') { $env:TEMP } else { $env:RUNNER_TEMP }
+          if ([string]::IsNullOrWhiteSpace($parent) -or -not [IO.Path]::IsPathFullyQualified($parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) { throw 'existing absolute package parent required' }
+          $candidate = Join-Path $parent 'atn-native-archive'
           $suffix = if ($env:RUNNER_OS -eq 'Windows') { '.exe' } else { '' }
           $binary = Join-Path $env:RUNNER_TEMP "agent-task-notify$suffix"
           go build -trimpath -o $binary ./cmd/agent-task-notify
@@ -119,7 +123,9 @@ jobs:
           $download = Join-Path $env:RUNNER_TEMP 'atn-canonical-download'
           $extension = if ($env:RUNNER_OS -eq 'Windows') { '.zip' } else { '.tar.gz' }
           $archive = Join-Path $download "atn-native-0.2.0-rc.1-${{ matrix.platform }}$extension"
-          $extract = Join-Path $env:RUNNER_TEMP '原生 package verified'
+          $parent = if ($env:RUNNER_OS -eq 'Windows') { $env:TEMP } else { $env:RUNNER_TEMP }
+          if ([string]::IsNullOrWhiteSpace($parent) -or -not [IO.Path]::IsPathFullyQualified($parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) { throw 'existing absolute package parent required' }
+          $extract = Join-Path $parent '原生 package verified'
           Write-Output "source=$env:GITHUB_SHA os=$env:RUNNER_OS arch=$env:RUNNER_ARCH canonical=${{ matrix.platform }}"
           go run ./cmd/package-native verify --archive $archive --checksums (Join-Path $download 'SHA256SUMS') --platform '${{ matrix.platform }}' --version 0.2.0-rc.1 --extract-to $extract
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

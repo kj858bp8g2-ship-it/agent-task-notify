@@ -1,10 +1,10 @@
 # 原生候选安装 — 0.2.0-rc.1
 
-本包仅为尚未发布的实验测试候选，目标为 Windows x64、Mac Intel 和 Apple Silicon。Mac **未签名、未公证**；如果系统阻止执行，请停止，不要移除 quarantine、绕过 Gatekeeper、关闭保护或请求管理员权限。编译/CI 通过不代表真实桌面首次授权、Agent 加载或手机送达已验证。包内 Skill 仍是过渡旧版指南，请勿用它安装本候选；正式分发必须等原生 Skill 更新并重新验证最终归档。
+本包是 Windows x64 与实验性 Mac Intel/Apple Silicon 的预发布候选，不是稳定兼容承诺。Mac **未签名、未公证**，普通 Agent 自动安装应停止并说明仅供明确授权的开发者实验路线；系统阻止执行时，不要移除 quarantine、绕过 Gatekeeper、关闭保护或请求管理员权限。编译/CI 通过不代表真实桌面首次授权、Agent 加载或手机送达已验证。包内 Skill 可协助本地安装，但阅读仓库、导入 Skill 不会自动安装、启用常驻服务或发送通知。发布须经过精确 tag 的原生/旧版/归档门禁，见[候选验证记录](https://github.com/kj858bp8g2-ship-it/agent-task-notify/blob/v0.2.0-rc.1/docs/native-validation.md)。
 
 ## 获取并校验
 
-仅从已审查仓库的精确候选 workflow run/source commit 获取对应 `native-candidate-windows-amd64`、`native-candidate-darwin-amd64` 或 `native-candidate-darwin-arm64` artifact。其中应只有 Agent Task Notify（ATN）归档与 `SHA256SUMS`，归档分别为 `atn-native-0.2.0-rc.1-windows-amd64.zip`、`atn-native-0.2.0-rc.1-darwin-amd64.tar.gz` 或 `atn-native-0.2.0-rc.1-darwin-arm64.tar.gz`。先核对仓库、运行、提交和 artifact 来源，再信任校验和。SHA-256 能检测损坏，但攻击者可同时替换归档与校验和，哈希本身不是发布者身份认证。
+仅使用 `kj858bp8g2-ship-it/agent-task-notify` 已审查的精确 `v0.2.0-rc.1` prerelease（发布后），或精确候选 workflow run/source commit。发布资产是三个 Agent Task Notify（ATN）归档及合并的 `SHA256SUMS`：`atn-native-0.2.0-rc.1-windows-amd64.zip`、`atn-native-0.2.0-rc.1-darwin-amd64.tar.gz`、`atn-native-0.2.0-rc.1-darwin-arm64.tar.gz`。发布前的 `native-candidate-windows-amd64`、`native-candidate-darwin-amd64`、`native-candidate-darwin-arm64` artifact 各含一个归档及单条校验文件。先核对仓库、tag/运行、提交和 artifact 来源，再信任校验和。SHA-256 能检测损坏，但攻击者可同时替换归档与校验和，哈希本身不是发布者身份认证。不要使用下载后直接执行的 curl-to-shell 安装方式。
 
 解压前核对 SHA256SUMS 中唯一对应文件名与实际哈希。Windows 可用系统 `certutil -hashfile ARCHIVE SHA256`，Mac 可用 `shasum -a 256 ARCHIVE`。先查看归档列表：须符合 `manifest.json` 固定清单，不能有绝对路径、`..`、重复项或链接。只解到新的用户自有目录，不覆盖旧安装。Mac 使用 tar.gz 保留执行权限，不用裸程序 ZIP 转运。保留两份 INSTALL、manifest、许可、Skill 与 integrations。默认设置及六个 Agent 图标已内嵌，不另安装可变配置/图标副本。
 
@@ -14,7 +14,7 @@
 go run ./cmd/package-native verify --archive ABS_ARCHIVE --checksums ABS_SHA256SUMS --platform PLATFORM --version 0.2.0-rc.1 --extract-to ABS_NEW_FOLDER
 ```
 
-占位符换成绝对路径，空格路径需引号。工具先验证哈希、精确名称/清单、大小、权限、平台、架构、两份相同程序和 manifest，再运行解出的程序；只接受当前 OS/架构。它创建新的明确用户自有目录，在源码外隔离 HOME/用户数据/temp/CWD、清空 PATH，运行 version、doctor 和六个干预前预览，不发通知、不打开 Keychain。它是开发工具，不是最终用户依赖。通知程序本身无需额外安装 PowerShell、Node、Python 或 Go；Agent 自身运行时及已验证的宿主命令 shell 仍由宿主提供。
+占位符换成绝对路径，空格路径需引号。工具先验证哈希、精确名称/清单、大小、权限、平台、架构、两份相同程序和 manifest，再运行解出的程序；只接受当前 OS/架构。**调用者必须为新的 extract-to 目录选择源码外、已存在且自有的父目录**：隔离测试目录位于 extract-to 的同级，验证器本身不保证选址在源码外。它创建新的明确用户自有目录，隔离 HOME/用户数据/temp/CWD、清空 PATH，运行 version、doctor 和六个干预前预览，不发通知、不打开 Keychain。开发验证器需要对应 artifact 的单条 SHA256SUMS；若使用发布的合并校验文件，先将唯一匹配归档名的原始条目保存到独立本地文件，勿改哈希。它是开发工具，不是最终用户依赖。通知程序本身无需额外安装 PowerShell、Node、Python 或 Go；Agent 自身运行时及已验证的宿主命令 shell 仍由宿主提供。
 
 ## 先检查、配置，再显式安装
 
@@ -27,7 +27,7 @@ agent-task-notify preview --agent codex --data-directory ABS_DATA
 agent-task-notify configure --provider bark --data-directory ABS_DATA
 ```
 
-需要时把 `bark` 换成 `ntfy`。凭据仅在本地终端输入，不要把令牌、设备密钥、完整私有 URL 或配置文件贴到 Agent 聊天。非终端输入必须显式加 `--credential-stdin`；可选 `--settings-file ABS_JSON` 读取本地非秘密设置补丁。凭据用 Windows DPAPI/Mac Keychain 保护，无明文或 security CLI 回退。普通 preview 不发送；只有显式 `preview --agent ID --send` 才授权测试通知。包验证不得使用 `--send`。
+`bark` 面向 iOS，`ntfy`/Android 仍为实验性。凭据仅在本地终端隐藏输入，不要把令牌、设备密钥、完整私有 URL 或配置文件贴到 Agent 聊天或命令参数。非终端输入必须显式加 `--credential-stdin`，从授权的本地来源提供；可选 `--settings-file ABS_JSON` 读取本地非秘密设置补丁。凭据与精确宿主原文备份用 Windows CurrentUser DPAPI/Mac Keychain 支持的加密保护，无明文或 security CLI 回退。仅显式配置或获授权应用安装/卸载时的前台 Vault 操作可创建/授权 Keychain 密钥；doctor/干预前 preview 只读设置和封套语法存在性，不解密、不打开 Keychain，不证明凭据有效、密钥已解锁或服务已接受。普通 preview 不发送；只有显式 `preview --agent ID --send` 才授权可选的真实响铃测试。排队/服务接受不等于手机送达，包验证不得使用 `--send`。ntfy 须核实服务端主题 ACL；随机名字或 token 本身不证明隐私，未认证 opt-in 表示接受暴露风险。
 
 六个 ID：`codex`、`claude-code`、`cursor`、`gemini-cli`、`opencode`、`workbuddy`。前五种先预览：
 
@@ -36,7 +36,7 @@ agent-task-notify install --agent codex --command-shell cmd --data-directory ABS
 agent-task-notify install --agent codex --command-shell cmd --data-directory ABS_DATA --apply
 ```
 
-Windows 示例仅适合确实使用 cmd 的宿主；只有验证相应宿主 shell 后才能选 `powershell` 或 `posix`。Mac 使用显式 `--command-shell posix`。不要把当前交互终端等同宿主 shell。`--config-path ABS_FILE` 可指定明确核实的配置：默认分别为用户 HOME 下 `.codex/hooks.json`、`.claude/settings.json`、`.cursor/hooks.json`、`.gemini/settings.json`；OpenCode 为 `$XDG_CONFIG_HOME/opencode/opencode.json` 或 `$HOME/.config/opencode/opencode.json`，实际只写同级 `plugins/agent-task-notify.js`。宿主目标父目录（包括 OpenCode plugins）须已存在且用户自有。检查打印的目标/计划，获得授权后才用 `--apply`。保留未知字段、其它 Hook；受保护备份和收据是安装前提，冲突停止。Codex 原 `notify` 配置不覆盖，宿主信任/审批由用户完成。导入 Skill **不代表**后台 Hook 已启用。
+Windows 示例仅适合确实使用 cmd 的宿主；只有验证相应宿主 shell 后才能选 `powershell` 或 `posix`。Mac 使用显式 `--command-shell posix`。不要把当前交互终端等同宿主 shell。`--config-path ABS_FILE` 可指定明确核实的配置：默认分别为用户 HOME 下 `.codex/hooks.json`、`.claude/settings.json`、`.cursor/hooks.json`、`.gemini/settings.json`；OpenCode 的 `$XDG_CONFIG_HOME/opencode/opencode.json` 或 `$HOME/.config/opencode/opencode.json` 仅为定位器，实际只写同级 `plugins/agent-task-notify.js`。宿主目标父目录（包括 OpenCode plugins）须已存在且用户自有，安装器不会创建或修复宿主目录。缺失时先停止，核实宿主位置后在本地明确创建/验证，不以提权或修改权限绕过。已有空白、空内容或损坏 JSON 不会被替换，须显式处理。检查打印的目标/计划，获得授权后才用 `--apply`。保留未知字段、其它 Hook 及 JSON 数字原始表示；受保护备份和收据是前提，冲突停止。宿主配置上限 4 MiB、加密封套 6 MiB。两秒锁限制只针对获取锁的等待，不是 OS 调用或整个安装的硬超时；前台 Vault 授权先于锁。Codex 原 `notify` 不覆盖，宿主信任/审批由用户完成。导入 Skill **不代表**后台 Hook 已启用；收据也不能证明没有其他插件路线或宿主已经加载。
 
 OpenCode 在自身运行时加载 JS bridge，再直接启动原生程序。保留根程序旁的 `integrations/opencode`；原生安装器生成含显式程序/数据路径的 shim。不能直接导入旧默认 wrapper 替代原生安装。旧 PowerShell/plugin 路线保持独立，不与原生路线双重注册。本候选不升级现用安装、不读取旧设备密钥；旧源码脚本保持不变。
 
@@ -46,6 +46,12 @@ OpenCode 在自身运行时加载 JS bridge，再直接启动原生程序。保�
 
 ## 默认行为与卸载
 
-支持的任务开始事件启动计时；重复开始不重置。默认 1800 秒触发、3600 秒进入长任务档位，Bark 目标提醒 45/60 秒，铃声 `alarm`。这不是电话，无法承诺精确实际响铃时长。当前适配器不保证覆盖所有 `needs_attention` 时刻；后台运行与重试依赖宿主/OS 支持。
+支持的任务开始事件启动计时；重复开始不重置，重复结束不创建第二份主任务。默认可调设置为 `minSeconds: 1800`、`longTaskSeconds: 3600`、`mediumRingSeconds: 45`、`longRingSeconds: 60`、`continuous: true`、`level: critical`、`volume: 7`、`sound: alarm`、`ntfyPriority: 4`、`enableAttention: false`、`icons: {}`。阈值须正数且有序，铃声目标 30–60 秒、音量 0–10、优先级 1–5。本地 JSON 补丁如 `{"minSeconds":300,"longTaskSeconds":1200,"sound":"alarm"}` 通过 configure 的 `--settings-file` 提供，凭据仍在本地输入，不编辑程序内嵌默认值。Bark 连续模式由主通知和一次续响组成，手机历史可能显示两条；45/60 秒只是近似目标，不保证实际响铃长度。普通单次由声音本身决定。ntfy 声音由手机控制，不发送 Call/X-Call 或 Bark 专属声音字段；都不是真实电话。
 
-先运行 `uninstall --agent ID --data-directory ABS_DATA` 预览，审查授权后再加 `--apply`。只移除收据确认的原生自有项，不整份恢复配置或删除用户/数据目录。WorkBuddy 通过已验证宿主插件流程手动移除。在用途明确前保留受保护备份和数据，不自动递归删除目录或移除 Keychain 条目。
+六种图标分别对应 Codex/ChatGPT、Claude Code/Claude、Cursor、Gemini CLI/Gemini、OpenCode、WorkBuddy，内嵌的是远程图标元数据。它们仅装饰通知，不替换应用或系统小图标；远程图片可变化，引用不授予品牌许可。`icons` 可按 ID 指定 HTTPS 图片或用空字符串省略。每个任务创建时冻结设置和图标。没有额外遥测；选定服务必然收到其凭据及通用通知内容，不含任务正文、路径或原生 ID。本地加密不等于推送端到端加密。
+
+当前适配器不保证覆盖所有 `needs_attention`，没有原生 run ID 的来源无法完全消除延迟 Stop 歧义。仅明确可重试错误最多五次主发送、间隔 5/15/30/60 秒，续响只发送一次。无离线、常驻服务、重启恢复、恰好一次或手机送达保证；state → job → spawn 有崩溃缺口，不确定发送不重放，最后检查也可能与新事件竞态。240 秒 worker context 是协作预算，不是硬 OS 杀进程/进程树约束。
+
+先运行 `uninstall --agent ID --data-directory ABS_DATA` 预览，审查授权后再加 `--apply`。只移除收据确认的原生自有项，不整份恢复配置或删除用户/数据目录。卸载完成前保留原程序包，删除原包可能令文件系统身份验证安全拒绝；自有条目被外部编辑时先审查，不能盲目恢复。WorkBuddy 通过已验证宿主插件流程手动移除。回退旧版先停用/移除原生登记，保留受保护数据和备份，再显式启用一条已审查旧路线及原来的独立数据；不自动读取/迁移旧密钥、不覆盖现用 Hook、不递归删除目录或移除 Keychain 条目。
+
+只读/不支持的文件系统、非私有根、链接/reparse、未知所有者/安全元数据及部分 OS 合法名称会被拒绝，不修复权限。源码隔离只检查祖先 `.git` 或本工具 `go.mod` 加 `config/native-source-files.json` 的精确标记，不能普遍识别无标记源码，也不是万能防泄露保证。允许受信任 OS 所有者祖先不等于接受任意服务共有目录，私有根仍须当前用户所有。详见[原生兼容性](https://github.com/kj858bp8g2-ship-it/agent-task-notify/blob/v0.2.0-rc.1/docs/native-compatibility.md)与[独立旧版指南](https://github.com/kj858bp8g2-ship-it/agent-task-notify/blob/v0.2.0-rc.1/README.zh-CN.md#旧版-windows-路线)。

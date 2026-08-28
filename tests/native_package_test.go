@@ -16,13 +16,326 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"slices"
 	"sort"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kj858bp8g2-ship-it/agent-task-notify/internal/core"
 )
+
+func nativeSourceRoot(t *testing.T) string {
+	t.Helper()
+	_, file, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("test source location unavailable")
+	}
+	root := filepath.Dir(filepath.Dir(file))
+	if _, err := os.Stat(filepath.Join(root, "go.mod")); err != nil {
+		t.Fatal(err)
+	}
+	return root
+}
+
+func nativeSourceText(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(nativeSourceRoot(t), filepath.FromSlash(path)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.ReplaceAll(string(data), "\r\n", "\n")
+}
+
+// Installed guidance is an interface: missing commands/provider/platform
+// boundaries or a broken local link would strand an offline package user.
+func TestNativeGuideContract(t *testing.T) {
+	compat := nativeSourceText(t, "docs/native-compatibility.md")
+	for _, agent := range core.Agents() {
+		if !strings.Contains(compat, "`"+agent.ID+"`") {
+			t.Errorf("missing compatibility ID %s", agent.ID)
+		}
+	}
+	for _, path := range []string{"docs/native-installation.md", "skills/agent-task-notify/SKILL.md"} {
+		guide := nativeSourceText(t, path)
+		for _, value := range []string{"0.2.0-rc.1", "Windows", "Mac", "experimental", "bark", "ntfy", "Android", "iOS", "version", "configure", "doctor", "preview", "install", "uninstall", "--data-directory", "--send", "--apply", "1800", "3600", "45", "60", "alarm", "needs_attention", "chat"} {
+			if !strings.Contains(guide, value) {
+				t.Errorf("%s missing installed contract %q", path, value)
+			}
+		}
+		for _, agent := range core.Agents() {
+			if !strings.Contains(guide, "`"+agent.ID+"`") {
+				t.Errorf("%s missing ID %s", path, agent.ID)
+			}
+		}
+		if strings.Contains(guide, "transitional legacy") || strings.Contains(guide, "../../README.md") {
+			t.Errorf("%s not native/self-contained", path)
+		}
+	}
+}
+
+// This intentionally checks the known YAML layout, not arbitrary YAML. Any
+// new trigger/job/permission must receive review rather than escape the gate.
+func TestNativeReleaseWorkflowContract(t *testing.T) {
+	source := nativeSourceText(t, ".github/workflows/native-release.yml")
+	pre, jobs, ok := strings.Cut(source, "\njobs:\n")
+	if !ok || !strings.Contains(pre, "on:\n  push:\n    tags: ['v0.2.0-rc.1']\n  workflow_dispatch:\n") || !strings.Contains(pre, "permissions:\n  contents: read\n") {
+		t.Fatal("release triggers/default permission not exact")
+	}
+	for _, banned := range []string{"branches:", "pull_request", "schedule:", "workflow_call:", "write-all", "secrets:", "continue-on-error", "always()", "quarantine", "xattr", "spctl", "--clobber"} {
+		if strings.Contains(source, banned) {
+			t.Errorf("unsafe release capability %q", banned)
+		}
+	}
+	if strings.Count(jobs, "\n  ") == 0 {
+		t.Fatal("missing release jobs")
+	}
+	names := regexp.MustCompile(`(?m)^  ([a-z-]+):$`).FindAllStringSubmatch(jobs, -1)
+	var got []string
+	for _, name := range names {
+		got = append(got, name[1])
+	}
+	if !reflect.DeepEqual(got, []string{"native", "legacy", "publish"}) {
+		t.Fatalf("unreviewed job set: %v", got)
+	}
+	for _, job := range []struct{ name, path string }{{"native", "native.yml"}, {"legacy", "test.yml"}} {
+		want := "  " + job.name + ":\n    if: github.ref == 'refs/tags/v0.2.0-rc.1'\n    uses: ./.github/workflows/" + job.path + "\n"
+		if !strings.Contains(jobs, want) {
+			t.Errorf("missing exact-tag reusable gate %s", job.name)
+		}
+	}
+	_, publish, _ := strings.Cut(jobs, "  publish:\n")
+	if !strings.Contains(publish, "    needs: [native, legacy]\n    if: github.ref == 'refs/tags/v0.2.0-rc.1' && success()\n    permissions:\n      contents: write\n") || strings.Count(source, "contents: write") != 1 {
+		t.Fatal("publication must be the only writer and depend on both complete gates")
+	}
+	if strings.Count(publish, "actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53") != 3 || !strings.Contains(publish, "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803") {
+		t.Fatal("pinned exact downloads/checkout missing")
+	}
+	for _, platform := range []string{"windows-amd64", "darwin-amd64", "darwin-arm64"} {
+		if strings.Count(publish, "name: native-candidate-"+platform+"\n") != 1 {
+			t.Fatal("canonical artifact identity missing")
+		}
+	}
+	if strings.Count(publish, "GH_TOKEN:") != 1 || !strings.Contains(publish, "GH_TOKEN: ${{ github.token }}") {
+		t.Fatal("built-in job token must be step-scoped")
+	}
+	native := nativeSourceText(t, ".github/workflows/native.yml")
+	legacy := nativeSourceText(t, ".github/workflows/test.yml")
+	if !strings.Contains(native, "      - main\n") || !strings.Contains(native, "  workflow_call:\n") || !strings.Contains(legacy, "  workflow_call:\n") || !strings.Contains(legacy, "  push:\n  pull_request:\n") {
+		t.Fatal("reusable/full main gates missing")
+	}
+}
+
+func nativeWorkflowRun(t *testing.T, path, step string) string {
+	t.Helper()
+	source := nativeSourceText(t, path)
+	_, block, ok := strings.Cut(source, "      - name: "+step+"\n")
+	if !ok {
+		t.Fatal("workflow step missing", step)
+	}
+	block = strings.SplitN(block, "\n      - ", 2)[0]
+	_, body, ok := strings.Cut(block, "        run: |\n")
+	if !ok {
+		t.Fatal("literal script missing", step)
+	}
+	var lines []string
+	for _, line := range strings.Split(body, "\n") {
+		if strings.TrimSpace(line) == "" {
+			lines = append(lines, "")
+			continue
+		}
+		if !strings.HasPrefix(line, "          ") {
+			break
+		}
+		lines = append(lines, strings.TrimPrefix(line, "          "))
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
+func nativeReleasePython(t *testing.T, script, dir string, args ...string) (string, error) {
+	t.Helper()
+	python := "python3"
+	if runtime.GOOS == "windows" {
+		python = "python"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, python, append([]string{"-I", "-c", script}, args...)...)
+	cmd.Dir = dir
+	cmd.Env = append(withoutEnvironmentNames(os.Environ(), "GITHUB_REF", "GITHUB_REPOSITORY", "GH_TOKEN"), "GITHUB_REF=refs/tags/v0.2.0-rc.1", "GITHUB_REPOSITORY=kj858bp8g2-ship-it/agent-task-notify")
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
+func TestNativeReleasePublicationPlan(t *testing.T) {
+	script := nativeWorkflowRun(t, ".github/workflows/native-release.yml", "Publish only a confirmed absent prerelease")
+	// Only gh is replaced: no network, token, release, or tag mutations. The
+	// actual policy must reject auth/network/unknown/exists/race responses.
+	harness := `import subprocess, sys, json, os
+scenario = sys.argv[1]
+calls = []
+def fake_run(argv, **kwargs):
+    calls.append(argv)
+    assert argv[0] == "gh" and kwargs.get("capture_output") and kwargs.get("timeout")
+    if argv[1:3] == ["release", "view"]:
+        return subprocess.CompletedProcess(argv, 0 if scenario == "exists" else 1, '{"tagName":"v0.2.0-rc.1"}', '')
+    if argv[1:3] == ["api", "--method"] and argv[-1] == "repos/kj858bp8g2-ship-it/agent-task-notify":
+        return subprocess.CompletedProcess(argv, 1 if scenario == "auth" else 0, '{"full_name":"kj858bp8g2-ship-it/agent-task-notify"}', '')
+    if argv[1] == "api":
+        status = {"absent":404, "create-fails":404, "race":200, "network":0, "unknown":500, "forbidden":403, "bad404":404}[scenario]
+        body = '{"message":"Not Found"}' if scenario != "bad404" else 'unclassified'
+        return subprocess.CompletedProcess(argv, 1 if status != 200 else 0, 'HTTP/2.0 '+str(status)+'\n\n'+body, '')
+    if argv[1:3] == ["release", "create"]:
+        return subprocess.CompletedProcess(argv, 1 if scenario == "create-fails" else 0, '', '')
+    raise AssertionError(argv)
+subprocess.run = fake_run
+if scenario == "wrong-ref": os.environ["GITHUB_REF"] = "refs/heads/main"
+if scenario == "wrong-repo": os.environ["GITHUB_REPOSITORY"] = "other/repo"
+try:
+    exec(SCRIPT, {})
+    success = True
+except SystemExit as error:
+    success = error.code in (None, 0)
+assert success == (scenario == "absent"), (scenario, success, calls)
+creates = [c for c in calls if c[1:3] == ["release", "create"]]
+assert len(creates) == (1 if scenario in ("absent", "create-fails") else 0), calls
+if creates:
+    c = creates[0]
+    assert c[3] == "v0.2.0-rc.1" and "--verify-tag" in c and "--prerelease" in c
+    assert c[c.index("--repo")+1] == "kj858bp8g2-ship-it/agent-task-notify"
+    for name in ("atn-native-0.2.0-rc.1-windows-amd64.zip", "atn-native-0.2.0-rc.1-darwin-amd64.tar.gz", "atn-native-0.2.0-rc.1-darwin-arm64.tar.gz"):
+        assert sum(a.endswith('/'+name) for a in c) == 1, c
+    assert "SHA256SUMS" in c and "--clobber" not in c
+print('publication policy passed: '+scenario)
+`
+	encoded, _ := json.Marshal(script)
+	harness = "SCRIPT = " + string(encoded) + "\n" + harness
+	for _, scenario := range []string{"absent", "exists", "auth", "network", "unknown", "forbidden", "bad404", "race", "create-fails", "wrong-ref", "wrong-repo"} {
+		t.Run(scenario, func(t *testing.T) {
+			if output, err := nativeReleasePython(t, harness, t.TempDir(), scenario); err != nil {
+				t.Fatalf("publication policy: %v %s", err, output)
+			}
+		})
+	}
+}
+
+func TestNativeReleaseArchiveInspection(t *testing.T) {
+	script := nativeWorkflowRun(t, ".github/workflows/native-release.yml", "Inspect exact source and canonical archives")
+	for _, fault := range []string{"none", "source-version", "duplicate-version", "checksum", "extra-asset", "wrong-name", "manifest-version", "manifest-platform", "manifest-files", "duplicate-member", "traversal", "link", "mode", "binary-digest"} {
+		t.Run(fault, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.MkdirAll(filepath.Join(dir, "internal", "cli"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			source := "package cli\nconst Version = \"0.2.0-rc.1\"\n"
+			if fault == "source-version" {
+				source = "package cli\nconst Version = \"0.2.0-dev\"\n"
+			}
+			if fault == "duplicate-version" {
+				source += "const Version = \"0.2.0-rc.1\"\n"
+			}
+			if err := os.WriteFile(filepath.Join(dir, "internal", "cli", "app.go"), []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			var expectedSums []string
+			for _, platform := range []string{"windows-amd64", "darwin-amd64", "darwin-arm64"} {
+				binary, suffix := "agent-task-notify", ".tar.gz"
+				if platform == "windows-amd64" {
+					binary, suffix = binary+".exe", ".zip"
+				}
+				asset := "atn-native-0.2.0-rc.1-" + platform + suffix
+				out := filepath.Join(dir, "candidate", platform)
+				if err := os.MkdirAll(out, 0700); err != nil {
+					t.Fatal(err)
+				}
+				var entries []packageEntry
+				for _, name := range []string{binary, "LICENSE", "THIRD_PARTY_NOTICES.md", "manifest.json", "INSTALL.md", "INSTALL.zh-CN.md", "skills/agent-task-notify/SKILL.md", "skills/agent-task-notify/agents/openai.yaml", "integrations/opencode/agent-task-notify.mjs", "integrations/opencode/bridge.mjs", "workbuddy/.workbuddy-plugin/plugin.json", "workbuddy/hooks/hooks.json", "workbuddy/hooks/launch.sh", "workbuddy/runtime/" + binary} {
+					mode := os.FileMode(0644)
+					if name == binary || name == "workbuddy/runtime/"+binary || name == "workbuddy/hooks/launch.sh" {
+						mode = 0755
+					}
+					entries = append(entries, packageEntry{name, []byte("synthetic non-executable fixture"), mode, false})
+				}
+				if platform != "windows-amd64" {
+					entries = append(entries, packageEntry{"UNSIGNED-CANDIDATE.txt", []byte("UNSIGNED and NOT NOTARIZED"), 0644, false})
+				}
+				var names []string
+				for _, entry := range entries {
+					names = append(names, entry.name)
+				}
+				sort.Strings(names)
+				digest := sha256.Sum256(entries[0].data)
+				manifest := map[string]any{"schemaVersion": 1, "version": "0.2.0-rc.1", "platform": platform, "binarySHA256": hex.EncodeToString(digest[:]), "files": names}
+				if platform == "windows-amd64" {
+					switch fault {
+					case "manifest-version":
+						manifest["version"] = "0.2.0-dev"
+					case "manifest-platform":
+						manifest["platform"] = "darwin-arm64"
+					case "manifest-files":
+						manifest["files"] = []string{"manifest.json"}
+					case "binary-digest":
+						manifest["binarySHA256"] = strings.Repeat("0", 64)
+					case "duplicate-member":
+						entries = append(entries, entries[0])
+					case "traversal":
+						entries[0].name = "../outside"
+					case "link":
+						entries[0].link = true
+					case "mode":
+						entries[0].mode = 0644
+					}
+				}
+				encoded, _ := json.Marshal(manifest)
+				for i := range entries {
+					if entries[i].name == "manifest.json" {
+						entries[i].data = encoded
+					}
+				}
+				archive := packageWrite(t, entries, platform == "windows-amd64")
+				hash := sha256.Sum256(archive)
+				checksum := hex.EncodeToString(hash[:]) + "  " + asset + "\n"
+				expectedSums = append(expectedSums, checksum)
+				if platform == "windows-amd64" {
+					if fault == "checksum" {
+						checksum = strings.Repeat("0", 64) + "  " + asset + "\n"
+					}
+					if fault == "wrong-name" {
+						asset = "unexpected.zip"
+					}
+					if fault == "extra-asset" {
+						if err := os.WriteFile(filepath.Join(out, "unexpected.txt"), []byte("extra"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+				}
+				if err := os.WriteFile(filepath.Join(out, asset), archive, 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(out, "SHA256SUMS"), []byte(checksum), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			output, err := nativeReleasePython(t, script, dir)
+			if (err == nil) != (fault == "none") {
+				t.Fatalf("inspection fault=%s: %v %s", fault, err, output)
+			}
+			combined, readErr := os.ReadFile(filepath.Join(dir, "SHA256SUMS"))
+			if fault == "none" {
+				if readErr != nil || string(combined) != strings.Join(expectedSums, "") {
+					t.Fatal("combined checksums not exact")
+				}
+			} else if !os.IsNotExist(readErr) {
+				t.Fatal("rejected inspection left publishable checksums")
+			}
+			if _, err := os.Stat(filepath.Join(dir, "outside")); !os.IsNotExist(err) {
+				t.Fatal("inspection extracted archive")
+			}
+		})
+	}
+}
 
 type packageEntry struct {
 	name string
@@ -35,10 +348,7 @@ type packageEntry struct {
 // binary instead of the archived executable must fail these black-box checks.
 func TestNativePackage(t *testing.T) {
 	t.Setenv("ATN_PACKAGE_DIAGNOSTICS", "")
-	root, err := filepath.Abs("..")
-	if err != nil {
-		t.Fatal(err)
-	}
+	root := nativeSourceRoot(t)
 	source := filepath.Join(root, "cmd", "package-native", "main.go")
 	if _, err := os.Stat(source); err != nil {
 		t.Fatal("native package build/verify command is missing")
@@ -51,7 +361,15 @@ func TestNativePackage(t *testing.T) {
 	}
 	binary := nativeExecutable(t)
 	platform := runtime.GOOS + "-" + runtime.GOARCH
-	out := filepath.Join(t.TempDir(), "new-output")
+	runner := "macOS"
+	if runtime.GOOS == "windows" {
+		runner = "Windows"
+	}
+	selected, err := nativeCISelectedPath(t, "Build canonical unsigned candidate archive", "candidate", runner, t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatal("actual package caller selection", err, selected)
+	}
+	out := strings.TrimSpace(selected)
 	args := []string{"build", "--source-root", root, "--binary", binary, "--platform", platform, "--version", "0.2.0-rc.1", "--output", out}
 	packageRun(t, tool, true, args...)
 	name := "atn-native-0.2.0-rc.1-" + platform + ".tar.gz"
@@ -115,8 +433,22 @@ func TestNativePackage(t *testing.T) {
 				t.Fatal("launcher must be LF")
 			}
 		case "UNSIGNED-CANDIDATE.txt":
-			if !bytes.Contains(e.data, []byte("UNSIGNED")) {
+			if !bytes.Contains(e.data, []byte("UNSIGNED")) || !bytes.Contains(e.data, []byte("INSTALL")) || bytes.Contains(e.data, []byte("transitional")) {
 				t.Fatal("unsigned marker missing")
+			}
+		case "skills/agent-task-notify/SKILL.md", "INSTALL.md", "INSTALL.zh-CN.md":
+			if !bytes.Contains(e.data, []byte("0.2.0-rc.1")) || !bytes.Contains(e.data, []byte("--data-directory")) || !bytes.Contains(e.data, []byte("--send")) {
+				t.Fatal("packaged native guide missing", e.name)
+			}
+			for _, match := range regexp.MustCompile(`\[[^\]]*\]\(([^)]+)\)`).FindAllSubmatch(e.data, -1) {
+				link := string(match[1])
+				if strings.HasPrefix(link, "https://") || strings.HasPrefix(link, "#") {
+					continue
+				}
+				target := filepath.ToSlash(filepath.Clean(filepath.Join(filepath.Dir(e.name), link)))
+				if !slices.Contains(want, target) {
+					t.Fatal("broken packaged relative link", e.name, link)
+				}
 			}
 		}
 	}
@@ -128,7 +460,11 @@ func TestNativePackage(t *testing.T) {
 	if manifest.SchemaVersion != 1 || manifest.Version != "0.2.0-rc.1" || manifest.Platform != platform || manifest.BinarySHA256 != hex.EncodeToString(binHash[:]) || !reflect.DeepEqual(manifest.Files, want) {
 		t.Fatal("manifest mismatch")
 	}
-	extract := filepath.Join(t.TempDir(), "中文 空格 candidate")
+	selected, err = nativeCISelectedPath(t, "Verify and run the downloaded canonical archive", "extract", runner, t.TempDir(), t.TempDir())
+	if err != nil {
+		t.Fatal("actual verifier caller selection", err, selected)
+	}
+	extract := strings.TrimSpace(selected)
 	if runtime.GOOS == "darwin" {
 		// A POSIX filename may contain a literal backslash; Windows root
 		// normalization must not redirect this valid packaged location.

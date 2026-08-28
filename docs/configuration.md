@@ -1,4 +1,8 @@
-# Configuration
+# Configuration routes
+
+For native `0.2.0-rc.1`, use [native configuration](native-configuration.md) and [native installation](native-installation.md). Native data is separate (`AgentTaskNotifyNative`), flags use `--data-directory`, and Mac is an unsigned experimental route. Do not use the legacy commands below for a native package or automatically migrate its credentials.
+
+## Legacy Windows configuration
 
 Runtime data defaults to Windows LocalApplicationData/AgentTaskNotify. Set `ATN_DATA_DIRECTORY` for a shared override used by runtime, configure, install, uninstall, and the OpenCode bridge; an explicit `-DataDirectory` (or bridge option/installed shim path) takes precedence. The unset default is unchanged; changing `LOCALAPPDATA` alone does not redirect Windows Known Folder resolution. Use a private directory outside the package. Install, upgrade, and uninstall preserve user settings and credentials; only receipt-owned hook entries are removed.
 

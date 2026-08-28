@@ -14,6 +14,83 @@ import (
 	"time"
 )
 
+// Exercise the actual caller selection on this filesystem for both runner
+// branches. A missing/relative parent must not fall back or be created.
+func TestNativeCISelectedParent(t *testing.T) {
+	for _, step := range []struct{ name, variable, leaf string }{
+		{"Build canonical unsigned candidate archive", "candidate", "atn-native-archive"},
+		{"Verify and run the downloaded canonical archive", "extract", "原生 package verified"},
+	} {
+		for _, runner := range []string{"Windows", "macOS"} {
+			for _, kind := range []string{"valid", "blank", "whitespace", "relative", "missing", "file"} {
+				t.Run(step.variable+"/"+runner+"/"+kind, func(t *testing.T) {
+					base, other := t.TempDir(), t.TempDir()
+					selected := base
+					switch kind {
+					case "blank":
+						selected = ""
+					case "whitespace":
+						selected = " "
+					case "relative":
+						selected = "relative-parent"
+					case "missing":
+						selected = filepath.Join(base, "missing")
+					case "file":
+						selected = filepath.Join(base, "file")
+						if err := os.WriteFile(selected, []byte("unchanged"), 0600); err != nil {
+							t.Fatal(err)
+						}
+					}
+					temp, runnerTemp := selected, other
+					if runner == "macOS" {
+						temp, runnerTemp = other, selected
+					}
+					got, err := nativeCISelectedPath(t, step.name, step.variable, runner, temp, runnerTemp)
+					if kind == "valid" {
+						if err != nil || strings.TrimSpace(got) != filepath.Join(base, step.leaf) {
+							t.Fatalf("wrong selected path: %v %q", err, got)
+						}
+					} else if err == nil {
+						t.Fatal("invalid selected parent accepted or fell back")
+					}
+					for _, dir := range []string{base, other} {
+						entries, err := os.ReadDir(dir)
+						if err != nil {
+							t.Fatal(err)
+						}
+						want := 0
+						if kind == "file" && dir == base {
+							want = 1
+						}
+						if len(entries) != want {
+							t.Fatal("selection created or changed a parent")
+						}
+					}
+				})
+			}
+		}
+	}
+}
+
+func nativeCISelectedPath(t *testing.T, step, variable, runner, temp, runnerTemp string) (string, error) {
+	t.Helper()
+	script := nativeWorkflowRun(t, ".github/workflows/native.yml", step)
+	script = strings.ReplaceAll(script, "${{ matrix.platform }}", "synthetic-platform")
+	end := strings.Index(script, "$"+variable+" =")
+	if end < 0 {
+		t.Fatal("output selection missing")
+	}
+	end += strings.Index(script[end:], "\n")
+	script = script[:end] + "\nif ($env:TEMP -cne $env:ATN_EXPECT_TEMP -or $env:RUNNER_TEMP -cne $env:ATN_EXPECT_RUNNER_TEMP) { throw 'environment changed' }\nWrite-Output $" + variable
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "pwsh", "-NoProfile", "-NonInteractive", "-Command", script)
+	cmd.Dir = t.TempDir()
+	cmd.Env = append(withoutEnvironmentNames(os.Environ(), "RUNNER_OS", "TEMP", "RUNNER_TEMP", "ATN_EXPECT_TEMP", "ATN_EXPECT_RUNNER_TEMP"), "RUNNER_OS="+runner, "TEMP="+temp, "RUNNER_TEMP="+runnerTemp, "ATN_EXPECT_TEMP="+temp, "ATN_EXPECT_RUNNER_TEMP="+runnerTemp)
+	output, err := cmd.CombinedOutput()
+	return string(output), err
+}
+
 // Canonical provenance is a release invariant: the Mac26 consumers must fetch
 // the Mac15 artifacts, not silently build their own replacement executable.
 func TestNativeCICanonicalPackages(t *testing.T) {

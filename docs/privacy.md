@@ -1,5 +1,17 @@
 # Privacy
 
+## Native 0.2.0-rc.1
+
+Native credentials are entered only in a local hidden prompt (or explicitly authorized local `--credential-stdin`), never chat, command arguments or pasted config. Windows uses CurrentUser DPAPI; experimental Mac uses a non-synchronizing Keychain key with authenticated encrypted files, not a key beside ciphertext or a `security` CLI production fallback. Data lives in the separate `AgentTaskNotifyNative` root, outside package/source/legacy data. Only explicit configuration or foreground Vault operations in authorized applied installation/removal can create/authorize a key; background/readonly credential reads never prompt, and doctor/dry preview only view syntactic settings/envelope presence without decryption/Keychain.
+
+Task text, raw Hook input, native session/run IDs, full URLs, tokens, response bodies and underlying exception text do not enter native logs. State keys are hashed; generic notification content and frozen Agent artwork go to the chosen provider. No extra telemetry is added. Protected host backups retain exact original bytes (which may contain secrets) in private data: host input limit 4 MiB, encrypted backup envelope 6 MiB. They are manual recovery material, not a stale whole-file uninstall restore. Keep original package identity until receipt-owned uninstall is complete; never automatically delete data/user folders/Keychain items or migrate live legacy credentials/hooks.
+
+Installation/configuration/doctor/dry preview do not send. Explicit `preview --send` or enabled lifecycle hooks can send; acceptance is not phone arrival. There is no exactly-once delivery, replay daemon, offline or restart guarantee. Source isolation checks only exact ancestor markers, not arbitrary source enumeration or a universal leak guarantee. Current-user private roots/files remain mandatory even when an OS-owned ancestor is trusted. The source release scanner below is heuristic, and hashes prove integrity only relative to trusted provenance, not publisher identity.
+
+Local encryption is not end-to-end push encryption. Both native and legacy providers receive the credential needed for routing/authentication and generic content; ntfy ACL warnings below apply to both. Remote artwork may involve remote fetches and can change; it is optional notification decoration, not a brand license or system icon replacement.
+
+## Legacy Windows and shared service/release boundaries
+
 Credentials are entered only locally, stored with Windows DPAPI CurrentUser protection, and kept outside the package in runtime data. Notification payloads exclude task prompts, output, file paths, provider credentials, and native identifiers. State filenames hash native identifiers.
 
 The selected push service necessarily receives the configured service credential (for authentication/routing) and generic notification content. DPAPI protects storage on this Windows account; it is not end-to-end push encryption. An unrestricted ntfy topic may be subscribed to or published to by other people. Random names are not access control, and supplying a bearer token alone does not prove that the topic has ACLs. Configure and verify server-side topic ACLs; local unauthenticated opt-in accepts the exposure risk.

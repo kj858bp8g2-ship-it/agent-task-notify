@@ -1,11 +1,37 @@
-# Native foundation validation
+# Native candidate validation — 0.2.0-rc.1
 
-Status: the source foundation passed the five-platform native CI matrix and
+## Current candidate status and open gates
+
+The native CLI now implements version/configure/doctor/preview/install/uninstall and six adapters; the historical version-only foundation evidence below is not the final product. The latest recorded pre-Task9 source is [`43488cca2cca774d0ec435e042ddf8158bdec3f1`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/commit/43488cca2cca774d0ec435e042ddf8158bdec3f1). [Native run 33159209594](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33159209594), attempt 1, failed Windows canonical build after all five source suites passed; [legacy run 33159209511](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33159209511) succeeded. All five dependent canonical consumers were skipped. **No final native prerelease/package acceptance is established by that run.** New Task9 docs/Skill/workflow changes require their own fresh exact-source checks; do not attach the earlier result to a later commit.
+
+| Source job | Actual recorded OS/build | Architecture | Source tests/vet/bridge | Canonical build |
+| --- | --- | --- | --- | --- |
+| [Windows](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33159209594/job/98809303212) | Windows Server 2025 Datacenter / 10.0.26100 | amd64 | Passed | Failed: ancestor-owner/rejected |
+| [Mac 15 ARM](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33159209594/job/98809303187) | macOS 15.7.7 / 24G720 | arm64 | Passed | Built, consumers skipped |
+| [Mac 15 Intel](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33159209594/job/98809303275) | macOS 15.7.9 / 24G830 | amd64 | Passed | Built, consumers skipped |
+| [Mac 26 ARM](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33159209594/job/98809303232) | macOS 26.5.2 / 25F84 | arm64 | Passed | Not a producer |
+| [Mac 26 Intel](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33159209594/job/98809303082) | macOS 26.6.1 / 25G76 | amd64 | Passed | Not a producer |
+
+Windows output identified an unsupported ancestor owner, not which ancestor or SID. The caller had chosen RUNNER_TEMP; Task9 chooses existing user TEMP for Windows private build-output/extract parents and retains RUNNER_TEMP on Mac. Blank, relative, missing or non-directory parents fail closed: no fallback, parent creation, environment rewrite, owner/ACL repair or safety relaxation. Package creation/verification still enforces the original ancestry/private/no-reparse/missing-leaf checks. This local pipeline change is not evidence that actual CI is repaired.
+
+Required final gates: all five native source jobs, three canonical builds, all five consumers of those exact three artifacts (Mac26 must use Mac15-produced archives), unchanged legacy suites, formal source scan and a controller-fresh Windows download/hash/verify with the packaged executable. Matching-OS verification executes version, doctor and six dry previews with isolated user/data/CWD and empty PATH; it does not send or authorize Keychain. The caller must choose an extract parent outside source because isolation is a sibling, not an enforced source-outside property. A final report must record the successful source, run, OS/architecture and actual artifact identities/hashes before acceptance.
+
+Current workflow `Native candidate gates` runs on `feature/native-*` and `main` pushes, pull requests, dispatch and reusable calls, with contents:read. It retains the five source and five consumer matrices and original 20/10-minute budgets. Mac full source suites use serialized packages and a guarded disposable CI Keychain; protected process tests retain inherited CI HOME only after inherited/exact-child keychain contexts prove fixture-only. Other readonly/unsafe/absent cases use synthetic HOME. Application data/config/CWD remain synthetic. Security.framework warnings, privilege-related foreign-owner skips and unobserved persisted-zero-ACL cases remain explicit, not treated as passed branches. Default/user Keychains and real host settings are not test targets.
+
+Developer source tests use Go 1.27.0, full Git history for the exact historical counterfactual, Bash/PowerShell, Node and Python standard-library workflow contract checks. A source ZIP without `.git` can build but cannot satisfy the full regression gate; missing history is not silently skipped. These build/CI tools are not end-user notifier dependencies.
+
+Only exact `v0.2.0-rc.1` tag push or manual dispatch at that tag can reach `native-release.yml` publication. Its local reusable native and legacy workflows run the tag's own code. One final publisher alone gets contents:write, downloads the three exact canonical artifact names from that run, checks bounded archive/hash/manifest/source-version data without extracting or running foreign binaries, and combines SHA256SUMS. It confirms repository access and explicit release absence (generic `gh release view` failure is insufficient), then uses `--verify-tag --prerelease` with four exact assets and the built-in job token only. Existing releases/tags are not overwritten; ambiguous creation failure requires inspection, not blind retry. Ordinary branch pushes cannot publish. Actual token permission/publication and post-publication asset verification remain separate controller gates, not simulated test claims.
+
+No native phone, real Agent-host, physical Mac first authorization, signing/notarization, Gatekeeper first launch, offline/reboot/restart or hard process-tree containment evidence exists. Mac and Android remain experimental. Sender acceptance is not phone arrival. Terminal job/lock completion is logical completion; 240 seconds is a cooperative context budget. Historical legacy iPhone testing is not new candidate evidence. Known crash gaps (state → job → spawn), uncertain-send non-replay, final-check races and bounded retention remain; see [compatibility](native-compatibility.md) and [installation](native-installation.md).
+
+## Historical foundation evidence (not final candidate acceptance)
+
+Historical status: the source foundation passed the five-platform native CI matrix and
 legacy CI at commit
 [`0d4c7c593c526328dfde7176df7910bb1976f2e7`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/commit/0d4c7c593c526328dfde7176df7910bb1976f2e7)
 on `feature/native-runtime-design`. This is foundation evidence, not approval of
-a complete migration or an end-user release. The native CLI exposes `version`
-only; it does not replace the six-agent notification integration.
+a complete migration or an end-user release. At that historical commit, the native CLI exposed `version`
+only; that evidence did not replace the six-agent notification integration.
 
 ## Completed CI evidence
 
@@ -28,9 +54,9 @@ also completed successfully at the same source commit. All native jobs used Go
 `1.27.0`; all four macOS jobs had `CGO_ENABLED=1`. Windows package output was
 nonverbose and reported success for every package.
 
-## Candidate CI contract
+## Historical foundation CI contract
 
-The `Native foundation gates` workflow runs only for `feature/native-*` pushes,
+At that commit, the `Native foundation gates` workflow ran only for `feature/native-*` pushes,
 pull requests, and manual dispatches. It is read-only except for its disposable
 checkout, test fixtures, and candidate artifacts, and has `contents: read`
 permission only. It uses GitHub-hosted Windows x64 and macOS standard runners.

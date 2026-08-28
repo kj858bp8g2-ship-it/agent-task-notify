@@ -37,7 +37,7 @@ const candidateVersion = "0.2.0-rc.1"
 const binaryLimit = 100 * 1024 * 1024
 const textLimit = 1024 * 1024
 const archiveLimit = 220 * 1024 * 1024
-const unsignedNotice = "UNSIGNED CANDIDATE — experimental CI test artifact only.\nNot signed or notarized for end-user distribution. Stop if macOS blocks execution; do not bypass Gatekeeper or remove quarantine.\nThe packaged Skill is transitional; publication is gated on the native documentation update.\n"
+const unsignedNotice = "UNSIGNED CANDIDATE — experimental CI test artifact only.\nNot signed or notarized for end-user distribution. Stop if macOS blocks execution; do not bypass Gatekeeper or remove quarantine.\nRead packaged INSTALL.md or INSTALL.zh-CN.md for the explicit experimental setup and evidence boundaries.\n"
 
 var errPackage = errors.New("native package rejected")
 

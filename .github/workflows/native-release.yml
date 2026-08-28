@@ -1,0 +1,174 @@
+name: Native candidate prerelease
+
+on:
+  push:
+    tags: ['v0.2.0-rc.1']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  native:
+    if: github.ref == 'refs/tags/v0.2.0-rc.1'
+    uses: ./.github/workflows/native.yml
+  legacy:
+    if: github.ref == 'refs/tags/v0.2.0-rc.1'
+    uses: ./.github/workflows/test.yml
+  publish:
+    needs: [native, legacy]
+    if: github.ref == 'refs/tags/v0.2.0-rc.1' && success()
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: native-candidate-windows-amd64
+          path: candidate/windows-amd64
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: native-candidate-darwin-amd64
+          path: candidate/darwin-amd64
+      - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
+        with:
+          name: native-candidate-darwin-arm64
+          path: candidate/darwin-arm64
+      - name: Inspect exact source and canonical archives
+        shell: python {0}
+        run: |
+          import gzip, hashlib, io, json, os, pathlib, re, stat, sys, tarfile, zipfile
+
+          def require(condition):
+              if not condition:
+                  raise ValueError("candidate inspection refused")
+
+          def read_file(path, limit):
+              require(stat.S_ISREG(path.lstat().st_mode) and path.stat().st_size <= limit)
+              with path.open("rb") as stream:
+                  data = stream.read(limit + 1)
+              require(len(data) <= limit)
+              return data
+
+          def unique_object(pairs):
+              result = {}
+              for key, value in pairs:
+                  require(key not in result)
+                  result[key] = value
+              return result
+
+          try:
+              require(os.environ.get("GITHUB_REF") == "refs/tags/v0.2.0-rc.1")
+              require(os.environ.get("GITHUB_REPOSITORY") == "kj858bp8g2-ship-it/agent-task-notify")
+              version = "0.2.0-rc.1"
+              source = read_file(pathlib.Path("internal/cli/app.go"), 65536).decode("utf-8")
+              require(len(re.findall(r"(?m)^\s*const\s+Version\b", source)) == 1)
+              require(re.findall(r'^const Version = "([^"\r\n]+)"$', source, re.M) == [version])
+              root = pathlib.Path("candidate")
+              platforms = ("windows-amd64", "darwin-amd64", "darwin-arm64")
+              require(stat.S_ISDIR(root.lstat().st_mode) and sorted(p.name for p in root.iterdir()) == sorted(platforms))
+              checksums = []
+              for platform in platforms:
+                  is_windows = platform == "windows-amd64"
+                  binary = "agent-task-notify.exe" if is_windows else "agent-task-notify"
+                  name = "atn-native-" + version + "-" + platform + (".zip" if is_windows else ".tar.gz")
+                  folder = root / platform
+                  require(stat.S_ISDIR(folder.lstat().st_mode))
+                  require(sorted(p.name for p in folder.iterdir()) == sorted((name, "SHA256SUMS")))
+                  data = read_file(folder / name, 220 * 1024 * 1024)
+                  checksum = hashlib.sha256(data).hexdigest() + "  " + name + "\n"
+                  require(read_file(folder / "SHA256SUMS", 1024).decode("ascii") == checksum)
+                  expected = sorted((binary, "LICENSE", "THIRD_PARTY_NOTICES.md", "manifest.json", "INSTALL.md", "INSTALL.zh-CN.md", "skills/agent-task-notify/SKILL.md", "skills/agent-task-notify/agents/openai.yaml", "integrations/opencode/agent-task-notify.mjs", "integrations/opencode/bridge.mjs", "workbuddy/.workbuddy-plugin/plugin.json", "workbuddy/hooks/hooks.json", "workbuddy/hooks/launch.sh", "workbuddy/runtime/" + binary) + (() if is_windows else ("UNSIGNED-CANDIDATE.txt",)))
+                  members = {}
+                  total = 0
+                  if is_windows:
+                      archive = zipfile.ZipFile(io.BytesIO(data))
+                  else:
+                      # Bound decompression before tarfile parses extended
+                      # headers, not only after a regular member is returned.
+                      with gzip.GzipFile(fileobj=io.BytesIO(data)) as compressed:
+                          expanded = compressed.read(221 * 1024 * 1024 + 1)
+                      require(len(expanded) <= 221 * 1024 * 1024)
+                      archive = tarfile.open(fileobj=io.BytesIO(expanded), mode="r:")
+                  with archive:
+                      for member in archive.infolist() if is_windows else archive:
+                          member_name = member.filename if is_windows else member.name
+                          require(member_name in expected and member_name not in members and len(members) < len(expected))
+                          mode = member.external_attr >> 16 if is_windows else member.mode
+                          require(stat.S_ISREG(mode) if is_windows else member.isfile())
+                          executable = member_name in (binary, "workbuddy/runtime/" + binary, "workbuddy/hooks/launch.sh")
+                          require(stat.S_IMODE(mode) == (0o755 if executable else 0o644))
+                          size = member.file_size if is_windows else member.size
+                          limit = (100 if member_name in (binary, "workbuddy/runtime/" + binary) else 1) * 1024 * 1024
+                          require(0 <= size <= limit)
+                          total += size
+                          require(total <= 220 * 1024 * 1024)
+                          with archive.open(member) if is_windows else archive.extractfile(member) as stream:
+                              content = stream.read(limit + 1)
+                          require(len(content) == size)
+                          members[member_name] = content
+                  require(sorted(members) == expected)
+                  manifest = json.loads(members["manifest.json"], object_pairs_hook=unique_object)
+                  require(set(manifest) == {"schemaVersion", "version", "platform", "binarySHA256", "files"})
+                  require(type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1)
+                  require(manifest["version"] == version and manifest["platform"] == platform and manifest["files"] == expected)
+                  require(manifest["binarySHA256"] == hashlib.sha256(members[binary]).hexdigest())
+                  require(members[binary] == members["workbuddy/runtime/" + binary])
+                  checksums.append(checksum)
+              # No extraction or foreign executable launch. Matching-OS package
+              # execution is required by the entire reusable native gate above.
+              with pathlib.Path("SHA256SUMS").open("x", encoding="ascii", newline="\n") as output:
+                  output.write("".join(checksums))
+              print("Three canonical archives and exact source version verified")
+          except (OSError, ValueError, KeyError, TypeError, EOFError, tarfile.TarError, zipfile.BadZipFile):
+              sys.exit("candidate inspection refused")
+      - name: Publish only a confirmed absent prerelease
+        shell: python {0}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          import json, os, re, subprocess, sys
+
+          repo = "kj858bp8g2-ship-it/agent-task-notify"
+          tag = "v0.2.0-rc.1"
+          def refuse():
+              sys.exit("publication refused; inspect the run and existing release before retrying")
+
+          def gh(*args):
+              try:
+                  return subprocess.run(["gh", *args], capture_output=True, text=True, timeout=120, check=False)
+              except (OSError, subprocess.TimeoutExpired):
+                  refuse()
+
+          if os.environ.get("GITHUB_REF") != "refs/tags/" + tag or os.environ.get("GITHUB_REPOSITORY") != repo:
+              refuse()
+          # A generic view failure is NOT proof of absence. First establish
+          # repository access, then require an explicit HTTP 404 JSON response.
+          view = gh("release", "view", tag, "--repo", repo, "--json", "tagName")
+          if view.returncode == 0:
+              refuse()
+          access = gh("api", "--method", "GET", "repos/" + repo)
+          try:
+              if access.returncode != 0 or json.loads(access.stdout).get("full_name") != repo:
+                  refuse()
+              absent = gh("api", "--method", "GET", "--include", "repos/" + repo + "/releases/tags/" + tag)
+              header, separator, body = absent.stdout.replace("\r\n", "\n").partition("\n\n")
+              if absent.returncode != 1 or not separator or not re.match(r"^HTTP/\S+ 404(?: |$)", header) or json.loads(body).get("message") != "Not Found":
+                  refuse()
+          except (ValueError, AttributeError):
+              refuse()
+          base = "https://github.com/" + repo + "/blob/" + tag + "/docs/"
+          notes = ("Native 0.2.0-rc.1 prerelease. Windows x64; Mac Intel/Apple Silicon are unsigned, not notarized experimental candidates, not ordinary auto-install. "
+                   "Real desktop hosts, first Keychain authorization, Gatekeeper first launch and iOS/Android phones are untested for this candidate. "
+                   "Installation: " + base + "native-installation.md\nCompatibility: " + base + "native-compatibility.md\nValidation: " + base + "native-validation.md")
+          result = gh("release", "create", tag, "--repo", repo, "--verify-tag", "--prerelease", "--title", "Native 0.2.0-rc.1 candidate", "--notes", notes,
+                      "candidate/windows-amd64/atn-native-0.2.0-rc.1-windows-amd64.zip",
+                      "candidate/darwin-amd64/atn-native-0.2.0-rc.1-darwin-amd64.tar.gz",
+                      "candidate/darwin-arm64/atn-native-0.2.0-rc.1-darwin-arm64.tar.gz", "SHA256SUMS")
+          if result.returncode != 0:
+              refuse()
+          print("Prerelease creation accepted; verify the actual release and four assets before handoff")
