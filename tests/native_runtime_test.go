@@ -31,6 +31,119 @@ var nativeRoot, nativeBinary string
 var nativePreserve bool
 var nativeFixtureNumber int
 
+func TestNativeProtectedHomeChangesOnlyHome(t *testing.T) {
+	home := t.TempDir()
+	env := []string{"HOME=old", "PATH=empty", "USERPROFILE=synthetic", "APPDATA=app", "LOCALAPPDATA=local", "XDG_CONFIG_HOME=xdg", "ATN_DATA_DIRECTORY=data", "TMPDIR=temp"}
+	before := append([]string(nil), env...)
+	got, err := nativeProtectedHomeEnvironment(env, home)
+	if err != nil || strings.Join(got, "\n") != strings.Join(append(before[1:], "HOME="+home), "\n") {
+		t.Fatal("protected environment lost isolation")
+	}
+	if strings.Join(env, "\n") != strings.Join(before, "\n") {
+		t.Fatal("protected environment mutated source")
+	}
+	file := filepath.Join(home, "not-a-directory")
+	if err := os.WriteFile(file, []byte("synthetic"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []string{"", "relative", file, filepath.Join(home, "missing")} {
+		if _, err := nativeProtectedHomeEnvironment(env, invalid); err == nil {
+			t.Fatal("unsafe protected HOME accepted")
+		}
+	}
+}
+
+func TestNativeProtectedCommandRequiresOwnedExplicitPaths(t *testing.T) {
+	root := t.TempDir()
+	f := &nativeFixture{root: root, data: filepath.Join(root, "data"), protected: true}
+	for _, command := range []string{"configure", "doctor", "preview", "hook", "worker", "uninstall"} {
+		if err := f.validateCommand([]string{command, "--data-directory", f.data}); err != nil {
+			t.Fatal("explicit owned data refused")
+		}
+	}
+	target := filepath.Join(root, "missing", "hooks.json")
+	if err := f.validateCommand([]string{"install", "--data-directory", f.data, "--config-path", target}); err != nil {
+		t.Fatal("contained missing-parent target refused")
+	}
+	for _, args := range [][]string{
+		{"configure"}, {"preview", "--data-directory"}, {"hook", "--data-directory", filepath.Dir(root)},
+		{"doctor", "--data-directory", f.data, "--data-directory", f.data},
+		{"install", "--data-directory", f.data},
+		{"install", "--data-directory", f.data, "--config-path"},
+		{"install", "--data-directory", f.data, "--config-path", target, "--config-path", target},
+		{"install", "--data-directory", f.data, "--config-path", filepath.Join(root+"-outside", "hooks.json")},
+		{"install", "--data-directory", f.data, "--config-path", "relative"},
+		{"install", "--data-directory", f.data, "--config-path", root},
+	} {
+		if err := f.validateCommand(args); err == nil {
+			t.Fatal("unsafe protected command accepted")
+		}
+		f.protected = false
+		if err := f.validateCommand(args); err != nil {
+			t.Fatal("synthetic negative test intercepted")
+		}
+		f.protected = true
+	}
+}
+
+func TestNativeKeychainGuardFailsClosedAtQueryBoundary(t *testing.T) {
+	root := t.TempDir()
+	fixture := filepath.Join(root, "synthetic.keychain-db")
+	other := filepath.Join(root, "other.keychain-db")
+	for _, path := range []string{fixture, other} {
+		if err := os.WriteFile(path, []byte("not a real keychain"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	fixture, err := filepath.EvalSymlinks(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contexts := [2]nativeKeychainContext{{env: []string{"HOME=inherited"}, cwd: "parent-cwd"}, {env: []string{"HOME=protected", "PATH=empty"}, cwd: "child-cwd"}}
+	stages := []string{"inherited-default", "inherited-search", "protected-child-default", "protected-child-search"}
+	for failAt, stage := range stages {
+		for _, test := range []struct {
+			name, output, reason string
+			err                  error
+		}{
+			{"process", "planted-secret", "process", errors.New("planted-secret")},
+			{"empty", "", "shape", nil},
+			{"multiple", fixture + "\n" + other, "shape", nil},
+			{"unbalanced-quote", "\"" + fixture, "shape", nil},
+			{"nested-quotes", "\"\"" + fixture + "\"\"", "shape", nil},
+			{"missing", filepath.Join(root, "missing"), "path", nil},
+			{"relative", "relative", "path", nil},
+			{"different", other, "mismatch", nil},
+		} {
+			t.Run(stage+"/"+test.name, func(t *testing.T) {
+				calls := 0
+				err := checkNativeKeychainContexts(fixture, contexts, func(env []string, cwd, action string) ([]byte, error) {
+					i := calls
+					calls++
+					wantAction := []string{"default-keychain", "list-keychains"}[i%2]
+					if strings.Join(env, "\n") != strings.Join(contexts[i/2].env, "\n") || cwd != contexts[i/2].cwd || action != wantAction {
+						t.Fatal("query did not use the exact context")
+					}
+					if i == failAt {
+						return []byte(test.output), test.err
+					}
+					return []byte("  \"" + fixture + "\"\n"), nil
+				})
+				if err == nil || err.Error() != "native Keychain guard: "+stage+"/"+test.reason || calls != failAt+1 {
+					t.Fatal("guard did not stop with a safe query stage")
+				}
+			})
+		}
+	}
+	calls := 0
+	if err := checkNativeKeychainContexts(fixture, contexts, func(_ []string, _, _ string) ([]byte, error) {
+		calls++
+		return []byte("\"" + fixture + "\"\n"), nil
+	}); err != nil || calls != 4 {
+		t.Fatal("guard refused matching disposable contexts")
+	}
+}
+
 // Catches confusing the private-state 0600 contract with executable metadata.
 // This fixture uses synthetic bytes only: no build, process, or Keychain access.
 func TestNativeExecutableFixturePolicyBoundary(t *testing.T) {
@@ -181,6 +294,8 @@ type nativeFixture struct {
 	t                    *testing.T
 	exe, root, data, cwd string
 	env                  []string
+	protected            bool
+	keychain             string
 	cleanupHTTP          func()
 	closeHTTP            func()
 }
@@ -216,8 +331,86 @@ func newNativeFixture(t *testing.T) *nativeFixture {
 	return f
 }
 
+// Explicit construction-time choice, never a fallback from a failed guard.
+// Only HOME changes on Darwin; Windows retains its fully synthetic HOME.
+func newNativeGuardedCIHomeFixture(t *testing.T) *nativeFixture {
+	t.Helper()
+	f := newNativeFixture(t)
+	f.protected = true
+	if runtime.GOOS == "darwin" {
+		if os.Getenv("CI") != "true" {
+			t.Skip("disposable CI Keychain required")
+		}
+		var err error
+		f.env, err = nativeProtectedHomeEnvironment(f.env, os.Getenv("HOME"))
+		if err != nil {
+			t.Fatal("native Keychain guard: protected-home/path")
+		}
+	}
+	f.keychain = nativeKeychainGuard(t, f.env, f.cwd)
+	return f
+}
+
+func nativeProtectedHomeEnvironment(env []string, home string) ([]string, error) {
+	info, err := os.Stat(home)
+	if !filepath.IsAbs(home) || err != nil || !info.IsDir() {
+		return nil, errors.New("native Keychain guard: protected-home/path")
+	}
+	return append(withoutEnvironmentNames(env, "HOME"), "HOME="+home), nil
+}
+
+func (f *nativeFixture) validateCommand(args []string) error {
+	if !f.protected {
+		return nil // Preserve intentional invalid-input tests in synthetic HOME.
+	}
+	invalid := errors.New("native fixture: protected command paths")
+	if len(args) == 0 {
+		return invalid
+	}
+	if args[0] == "version" || args[0] == "help" {
+		return nil
+	}
+	argument := func(name string) (string, bool) {
+		value, count := "", 0
+		for i, arg := range args {
+			if arg == name {
+				count++
+				if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+					value = args[i+1]
+				}
+			}
+		}
+		return value, count == 1 && value != ""
+	}
+	data, ok := argument("--data-directory")
+	if !ok || data != f.data || !nativeContainedPath(f.root, data) {
+		return invalid
+	}
+	if args[0] == "install" {
+		target, ok := argument("--config-path")
+		if !ok || !nativeContainedPath(f.root, target) {
+			return invalid
+		}
+	}
+	return nil
+}
+
+func nativeContainedPath(root, path string) bool {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return false
+	}
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != "." && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
 func (f *nativeFixture) command(input string, args ...string) (int, string, string, time.Duration) {
 	f.t.Helper()
+	if err := f.validateCommand(args); err != nil {
+		f.t.Fatal(err) // Refuse before any CLI process (including FG) can start.
+	}
+	if f.protected && (args[0] == "configure" || ((args[0] == "install" || args[0] == "uninstall") && containsFold(args, "--apply"))) {
+		nativeKeychainGuard(f.t, f.env, f.cwd)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, f.exe, args...)
@@ -302,9 +495,9 @@ func (f *nativeFixture) waitComplete(timeout time.Duration) bool {
 	}
 }
 
-// Read-only preconditions in BOTH contexts; do not infer a changed HOME shares
-// the runner's default Keychain. The shell fixture alone owns configuration.
-func nativeKeychainGuard(t *testing.T, env []string) string {
+// Both actual contexts must name only the fixture. The protected child retains
+// CI HOME explicitly; the shell fixture alone owns Keychain configuration.
+func nativeKeychainGuard(t *testing.T, env []string, cwd string) string {
 	t.Helper()
 	if runtime.GOOS != "darwin" {
 		return ""
@@ -315,38 +508,77 @@ func nativeKeychainGuard(t *testing.T, env []string) string {
 	root, err := filepath.EvalSymlinks(os.Getenv("RUNNER_TEMP"))
 	fixture, ferr := filepath.EvalSymlinks(os.Getenv("ATN_TEST_KEYCHAIN"))
 	if err != nil || ferr != nil || !filepath.IsAbs(root) || !filepath.IsAbs(fixture) {
-		t.Fatal("disposable Keychain fixture missing")
+		t.Fatal("native Keychain guard: fixture/path")
 	}
 	rel, err := filepath.Rel(root, fixture)
 	dir := filepath.Dir(rel)
 	info, statErr := os.Lstat(fixture)
 	if err != nil || filepath.Base(dir) != dir || !strings.HasPrefix(dir, "atn-keychain.") || len(dir) <= len("atn-keychain.") || filepath.Base(fixture) != "synthetic.keychain-db" || statErr != nil || !info.Mode().IsRegular() {
-		t.Fatal("unsafe disposable Keychain fixture")
+		t.Fatal("native Keychain guard: fixture/shape")
 	}
-	for _, environment := range [][]string{os.Environ(), env} {
-		for _, action := range []string{"default-keychain", "list-keychains"} {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			cmd := exec.CommandContext(ctx, "/usr/bin/security", action, "-d", "user")
-			cmd.Env = environment
-			cmd.WaitDelay = time.Second
-			data, err := cmd.Output()
-			cancel()
-			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-			if err != nil || len(lines) != 1 {
-				t.Fatal("isolated HOME Keychain precondition failed before foreground access")
-			}
-			actual, err := filepath.EvalSymlinks(strings.Trim(strings.TrimSpace(lines[0]), "\""))
-			if err != nil || actual != fixture {
-				t.Fatal("isolated HOME Keychain precondition failed before foreground access")
-			}
-		}
+	inheritedCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatal("native Keychain guard: inherited-cwd/path")
+	}
+	contexts := [2]nativeKeychainContext{{os.Environ(), inheritedCWD}, {env, cwd}}
+	if err := checkNativeKeychainContexts(fixture, contexts, func(environment []string, directory, action string) ([]byte, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "/usr/bin/security", action, "-d", "user")
+		cmd.Env, cmd.Dir = environment, directory
+		cmd.WaitDelay = time.Second
+		return cmd.Output()
+	}); err != nil {
+		t.Fatal(err)
 	}
 	return fixture
 }
 
+type nativeKeychainContext struct {
+	env []string
+	cwd string
+}
+
+// Only the external readonly query is injected for portable failure coverage.
+// Neither test outputs nor errors are propagated; all diagnostics are fixed.
+func checkNativeKeychainContexts(fixture string, contexts [2]nativeKeychainContext, query func([]string, string, string) ([]byte, error)) error {
+	for i, c := range contexts {
+		for j, action := range []string{"default-keychain", "list-keychains"} {
+			stage := []string{"inherited", "protected-child"}[i] + "-" + []string{"default", "search"}[j]
+			data, err := query(c.env, c.cwd, action)
+			reason := ""
+			lines := strings.Split(strings.TrimSpace(string(data)), "\n")
+			if err != nil {
+				reason = "process"
+			} else if len(lines) != 1 || strings.TrimSpace(lines[0]) == "" {
+				reason = "shape"
+			} else {
+				path := strings.TrimSpace(lines[0])
+				if len(path) >= 2 && strings.HasPrefix(path, "\"") && strings.HasSuffix(path, "\"") {
+					path = path[1 : len(path)-1]
+				}
+				actual, err := filepath.EvalSymlinks(path)
+				if path == "" || strings.Contains(path, "\"") {
+					reason = "shape"
+				} else if !filepath.IsAbs(path) || err != nil {
+					reason = "path"
+				} else if actual != fixture {
+					reason = "mismatch"
+				}
+			}
+			if reason != "" {
+				return errors.New("native Keychain guard: " + stage + "/" + reason)
+			}
+		}
+	}
+	return nil
+}
+
 func (f *nativeFixture) configure(provider, endpoint, patch string) {
 	f.t.Helper()
-	nativeKeychainGuard(f.t, f.env)
+	if !f.protected {
+		f.t.Fatal("native fixture: protected configure required")
+	}
 	settings := filepath.Join(f.root, "设置 文件.json")
 	if err := store.WriteAtomic(settings, []byte(patch)); err != nil {
 		f.t.Fatal(err)
@@ -365,7 +597,7 @@ func (f *nativeFixture) configure(provider, endpoint, patch string) {
 func (f *nativeFixture) hook(event string) {
 	f.t.Helper()
 	input := `{"hook_event_name":"` + event + `","session_id":"合成会话","turn_id":"合成运行","prompt":"planted-private-task"}`
-	code, out, errors, elapsed := f.command(input, "hook", "--agent", "codex")
+	code, out, errors, elapsed := f.command(input, "hook", "--agent", "codex", "--data-directory", f.data)
 	if code != 0 || out != "{\"continue\":true}\n" || errors != "" || elapsed > 2*time.Second {
 		f.t.Fatalf("hook/pipe EOF contract: code=%d elapsed=%v", code, elapsed)
 	}
@@ -404,8 +636,7 @@ func TestNativeRuntimeReadOnlyAndMalformed(t *testing.T) {
 func TestNativeRuntimeRetryExtensionAndDuplicateStop(t *testing.T) {
 	for _, provider := range []string{"bark", "ntfy"} {
 		t.Run(provider, func(t *testing.T) {
-			f := newNativeFixture(t)
-			nativeKeychainGuard(t, f.env)
+			f := newNativeGuardedCIHomeFixture(t)
 			var cleanup atomic.Bool
 			var mu sync.Mutex
 			var times []time.Time
@@ -515,44 +746,47 @@ func TestNativeRuntimeRetryExtensionAndDuplicateStop(t *testing.T) {
 }
 
 func TestNativePreviewSendAndAbsentCredential(t *testing.T) {
-	f := newNativeFixture(t)
-	var requests atomic.Int32
-	var cleanup atomic.Bool
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if cleanup.Load() {
-			w.WriteHeader(400)
-			return
+	t.Run("send", func(t *testing.T) {
+		f := newNativeGuardedCIHomeFixture(t)
+		var requests atomic.Int32
+		var cleanup atomic.Bool
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if cleanup.Load() {
+				w.WriteHeader(400)
+				return
+			}
+			requests.Add(1)
+			io.WriteString(w, `{"code":200}`)
+		}))
+		f.closeHTTP = server.Close
+		f.cleanupHTTP = func() { cleanup.Store(true) }
+		f.configure("bark", server.URL+"/synthetic-key", `{"continuous":false}`)
+		code, out, errors, _ := f.command("", "preview", "--agent", "codex", "--send", "--data-directory", f.data)
+		if code != 0 || errors != "" || !strings.Contains(out, "queued") || !strings.Contains(out, "not confirmed") {
+			t.Fatal("preview claimed delivery or did not queue")
 		}
-		requests.Add(1)
-		io.WriteString(w, `{"code":200}`)
-	}))
-	f.closeHTTP = server.Close
-	f.cleanupHTTP = func() { cleanup.Store(true) }
-	f.configure("bark", server.URL+"/synthetic-key", `{"continuous":false}`)
-	code, out, errors, _ := f.command("", "preview", "--agent", "codex", "--send")
-	if code != 0 || errors != "" || !strings.Contains(out, "queued") || !strings.Contains(out, "not confirmed") {
-		t.Fatal("preview claimed delivery or did not queue")
-	}
-	if !f.waitComplete(5*time.Second) || requests.Load() != 1 {
-		t.Fatal("preview did not use real worker")
-	}
-	missing := newNativeFixture(t)
-	code, out, errors, _ = missing.command("", "preview", "--agent", "codex", "--send")
-	if code != 0 || errors != "" || !strings.Contains(out, "queued") {
-		t.Fatal("absent credential queue contract")
-	}
-	if !missing.waitComplete(5 * time.Second) {
-		t.Fatal("missing credential worker blocked")
-	}
-	j := missing.jobs()
-	if len(j) != 1 || j[0]["diagnostic"] != "credential" || j[0]["attempts"] != float64(0) {
-		t.Fatal("missing credential unsafe behavior")
-	}
+		if !f.waitComplete(5*time.Second) || requests.Load() != 1 {
+			t.Fatal("preview did not use real worker")
+		}
+	})
+	t.Run("absent-credential", func(t *testing.T) {
+		missing := newNativeFixture(t)
+		code, out, errors, _ := missing.command("", "preview", "--agent", "codex", "--send")
+		if code != 0 || errors != "" || !strings.Contains(out, "queued") {
+			t.Fatal("absent credential queue contract")
+		}
+		if !missing.waitComplete(5 * time.Second) {
+			t.Fatal("missing credential worker blocked")
+		}
+		j := missing.jobs()
+		if len(j) != 1 || j[0]["diagnostic"] != "credential" || j[0]["attempts"] != float64(0) {
+			t.Fatal("missing credential unsafe behavior")
+		}
+	})
 }
 
 func TestNativeInstallPlansAndApply(t *testing.T) {
-	f := newNativeFixture(t)
-	nativeKeychainGuard(t, f.env)
+	f := newNativeGuardedCIHomeFixture(t)
 	target := filepath.Join(f.root, "合成 hooks.json")
 	before, err := hostfile.Read(target, 4<<20)
 	if err != nil {
@@ -562,7 +796,7 @@ func TestNativeInstallPlansAndApply(t *testing.T) {
 	if err := hostfile.Replace(target, before, original); err != nil {
 		t.Fatal(err)
 	}
-	args := []string{"install", "--agent", "cursor", "--config-path", target, "--command-shell", "powershell"}
+	args := []string{"install", "--agent", "cursor", "--config-path", target, "--command-shell", "powershell", "--data-directory", f.data}
 	code, out, errors, _ := f.command("", args...)
 	if code != 0 || errors != "" {
 		t.Fatalf("install plan: %d", code)
@@ -586,14 +820,14 @@ func TestNativeInstallPlansAndApply(t *testing.T) {
 	if !bytes.Contains(installed, []byte("agent-task-notify")) && !bytes.Contains(installed, []byte("通知 工具")) {
 		t.Fatal("self executable missing")
 	}
-	code, _, errors, _ = f.command("", "uninstall", "--agent", "cursor")
+	code, _, errors, _ = f.command("", "uninstall", "--agent", "cursor", "--data-directory", f.data)
 	if code != 0 || errors != "" {
 		t.Fatal("uninstall plan failed")
 	}
 	if b, _ := os.ReadFile(target); !bytes.Equal(b, installed) {
 		t.Fatal("uninstall plan changed host")
 	}
-	code, _, errors, _ = f.command("", "uninstall", "--agent", "cursor", "--apply")
+	code, _, errors, _ = f.command("", "uninstall", "--agent", "cursor", "--apply", "--data-directory", f.data)
 	if code != 0 || errors != "" {
 		t.Fatal("uninstall apply failed")
 	}
@@ -602,7 +836,7 @@ func TestNativeInstallPlansAndApply(t *testing.T) {
 		t.Fatal("uninstall ownership incorrect")
 	}
 	missing := filepath.Join(f.root, "missing", "hooks.json")
-	code, out, errors, _ = f.command("", "install", "--agent", "cursor", "--config-path", missing, "--apply")
+	code, out, errors, _ = f.command("", "install", "--agent", "cursor", "--config-path", missing, "--apply", "--data-directory", f.data)
 	if code != 1 || !strings.Contains(out, "target") || !strings.Contains(errors, "parent") {
 		t.Fatal("missing parent guidance")
 	}
@@ -615,8 +849,8 @@ func TestNativeLockedKeychainWorkerIsSilentAndBounded(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("macOS Keychain gate")
 	}
-	f := newNativeFixture(t)
-	fixture := nativeKeychainGuard(t, f.env)
+	f := newNativeGuardedCIHomeFixture(t)
+	fixture := f.keychain
 	var cleanup atomic.Bool
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -645,7 +879,7 @@ func TestNativeLockedKeychainWorkerIsSilentAndBounded(t *testing.T) {
 	if security("lock-keychain", fixture) != nil {
 		t.Fatal("synthetic Keychain lock failed")
 	}
-	code, out, errors, _ := f.command("", "preview", "--agent", "codex", "--send")
+	code, out, errors, _ := f.command("", "preview", "--agent", "codex", "--send", "--data-directory", f.data)
 	if code != 0 || !strings.Contains(out, "queued") || errors != "" {
 		t.Fatal("locked preview blocked")
 	}
@@ -667,7 +901,7 @@ func TestNativeLockedKeychainWorkerIsSilentAndBounded(t *testing.T) {
 	if requests.Load() != 0 {
 		t.Fatal("locked credential sent a request")
 	}
-	code, _, errors, _ = f.command("", "preview", "--agent", "codex", "--send")
+	code, _, errors, _ = f.command("", "preview", "--agent", "codex", "--send", "--data-directory", f.data)
 	if code != 0 || errors != "" || !f.waitComplete(5*time.Second) || requests.Load() != 1 {
 		t.Fatal("restored synthetic credential not accessible")
 	}
