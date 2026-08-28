@@ -1153,13 +1153,18 @@ func TestExistingEmptyOpenCodeShimIsUnowned(t *testing.T) {
 func TestReceiptCannotResolveAnEmptyPathFromCurrentHome(t *testing.T) {
 	requireProtection(t)
 	f := setup(t, "cursor", nil)
+	f.options.ConfigPath = filepath.Join(privateDirectory(t, filepath.Join(f.root, ".cursor")), "hooks.json")
+	installFixture(t, f)
+	// Keep Keychain-backed setup in the CI runner's original home context.
+	// Only read-only receipt planning needs the synthetic home below.
 	if runtime.GOOS == "windows" {
 		t.Setenv("USERPROFILE", f.root)
 	} else {
 		t.Setenv("HOME", f.root)
 	}
-	f.options.ConfigPath = filepath.Join(privateDirectory(t, filepath.Join(f.root, ".cursor")), "hooks.json")
-	installFixture(t, f)
+	if p, err := PlanUninstall(context.Background(), f.repo, "cursor"); err != nil || p.TargetPath != f.options.ConfigPath {
+		t.Fatal("valid receipt cannot be planned from synthetic home", err)
+	}
 	r := readRecordForTest(t, f)
 	r["receipt"].(map[string]any)["configPath"] = ""
 	raw, _ := json.Marshal(r)
