@@ -1,6 +1,6 @@
 {
   "hooks": {
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "bash \"${CODEBUDDY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/launch.sh\"" }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "bash \"${CODEBUDDY_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/launch.sh\"" }] }]
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "root=\"${CODEBUDDY_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; case \"$root\" in /*|[A-Za-z]:/*|[A-Za-z]:\\\\*) if [ -f \"$root/hooks/launch.sh\" ] && [ ! -L \"$root/hooks/launch.sh\" ]; then bash \"$root/hooks/launch.sh\" >/dev/null 2>&1 || :; fi ;; esac; printf '{\"continue\":true}\\n'" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "root=\"${CODEBUDDY_PLUGIN_ROOT:-${CLAUDE_PLUGIN_ROOT:-}}\"; case \"$root\" in /*|[A-Za-z]:/*|[A-Za-z]:\\\\*) if [ -f \"$root/hooks/launch.sh\" ] && [ ! -L \"$root/hooks/launch.sh\" ]; then bash \"$root/hooks/launch.sh\" >/dev/null 2>&1 || :; fi ;; esac; printf '{\"continue\":true}\\n'" }] }]
   }
 }

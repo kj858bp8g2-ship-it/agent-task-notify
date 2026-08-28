@@ -341,52 +341,63 @@ func TestNativePackage(t *testing.T) {
 			}
 			commands[event] = groups[0].Hooks[0].Command
 		}
-		dir := t.TempDir()
-		// Execute the command from the packaged hook configuration, not a
-		// separately reconstructed command that could hide bad quoting/paths.
-		cmd := exec.Command(bash, "-c", commands["UserPromptSubmit"])
-		cmd.Dir = dir
-		cmd.Env = append(withoutEnvironmentNames(os.Environ(), "CODEBUDDY_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "ATN_DATA_DIRECTORY"), "CODEBUDDY_PLUGIN_ROOT="+filepath.ToSlash(filepath.Join(extract, "workbuddy")), "ATN_DATA_DIRECTORY="+filepath.Join(dir, "unused-data"))
-		cmd.Stdin = strings.NewReader("[")
-		output, err := cmd.CombinedOutput()
-		if err != nil || string(output) != "{\"continue\":true}\n" {
-			t.Fatalf("native WorkBuddy neutral execution: %v %s", err, output)
-		}
-		// Invalid input increments only isolated diagnostics, proving the actual
-		// archived executable (not just the wrapper's neutral fallback) ran.
-		diagnostic, err := os.ReadFile(filepath.Join(dir, "unused-data", "input-diagnostics.json"))
-		var observed struct {
-			Count int `json:"count"`
-		}
-		if err != nil || json.Unmarshal(diagnostic, &observed) != nil || observed.Count != 1 {
-			t.Fatal("WorkBuddy did not pass stdin to archived native binary")
-		}
-		for _, c := range []struct {
-			name, primary, fallback string
-			count                   int
-		}{
-			{"fallback", "", filepath.ToSlash(filepath.Join(extract, "workbuddy")), 2},
-			{"primary-wins", filepath.ToSlash(filepath.Join(dir, "missing")), filepath.ToSlash(filepath.Join(extract, "workbuddy")), 2},
-			{"no-root", "", "", 2},
-			{"relative-root", "relative", "", 2},
-		} {
-			t.Run(c.name, func(t *testing.T) {
-				cmd := exec.Command(bash, filepath.ToSlash(filepath.Join(extract, "workbuddy/hooks/launch.sh")))
-				if c.name == "fallback" {
-					cmd = exec.Command(bash, "-c", commands["Stop"])
-				}
-				cmd.Dir = dir
-				cmd.Env = append(withoutEnvironmentNames(os.Environ(), "CODEBUDDY_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "ATN_DATA_DIRECTORY"), "CODEBUDDY_PLUGIN_ROOT="+c.primary, "CLAUDE_PLUGIN_ROOT="+c.fallback, "ATN_DATA_DIRECTORY="+filepath.Join(dir, "unused-data"))
-				cmd.Stdin = strings.NewReader("[")
-				out, err := cmd.CombinedOutput()
-				if err != nil || string(out) != "{\"continue\":true}\n" {
-					t.Fatal("WorkBuddy failure response")
-				}
-				data, err := os.ReadFile(filepath.Join(dir, "unused-data", "input-diagnostics.json"))
-				if err != nil || json.Unmarshal(data, &observed) != nil || observed.Count != c.count {
-					t.Fatal("WorkBuddy root selection or fallback changed")
-				}
-			})
+		packagedRoot := filepath.ToSlash(filepath.Join(extract, "workbuddy"))
+		for _, event := range []string{"UserPromptSubmit", "Stop"} {
+			for _, name := range []string{"primary", "fallback", "primary-wins", "no-root", "relative-root", "missing-launcher", "script-startup-failure", "script-syntax-failure"} {
+				t.Run(event+"/"+name, func(t *testing.T) {
+					dir := t.TempDir()
+					primary, fallback, wantRun := packagedRoot, "", true
+					switch name {
+					case "fallback":
+						primary, fallback = "", packagedRoot
+					case "primary-wins":
+						primary, fallback, wantRun = filepath.ToSlash(filepath.Join(dir, "missing")), packagedRoot, false
+					case "no-root":
+						primary, wantRun = "", false
+					case "relative-root":
+						primary, fallback, wantRun = "relative", packagedRoot, false
+					case "missing-launcher":
+						primary, wantRun = filepath.ToSlash(dir), false
+					case "script-startup-failure":
+						primary, wantRun = filepath.ToSlash(dir), false
+						if os.Mkdir(filepath.Join(dir, "hooks"), 0700) != nil || os.WriteFile(filepath.Join(dir, "hooks", "launch.sh"), []byte("printf 'synthetic partial output\\n'\nprintf 'synthetic launch error\\n' >&2\nexit 73\n"), 0600) != nil {
+							t.Fatal("failed-launch fixture")
+						}
+					case "script-syntax-failure":
+						primary, wantRun = filepath.ToSlash(dir), false
+						if os.Mkdir(filepath.Join(dir, "hooks"), 0700) != nil || os.WriteFile(filepath.Join(dir, "hooks", "launch.sh"), []byte("if then\n"), 0600) != nil {
+							t.Fatal("invalid-script fixture")
+						}
+					}
+					// Every case uses the actual packaged hook command, including
+					// invalid roots that fail before launch.sh can check anything.
+					ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+					defer cancel()
+					cmd := exec.CommandContext(ctx, bash, "-c", commands[event])
+					cmd.Dir = dir
+					cmd.Env = append(withoutEnvironmentNames(os.Environ(), "CODEBUDDY_PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "ATN_DATA_DIRECTORY"), "CODEBUDDY_PLUGIN_ROOT="+primary, "CLAUDE_PLUGIN_ROOT="+fallback, "ATN_DATA_DIRECTORY="+filepath.Join(dir, "unused-data"))
+					cmd.Stdin = strings.NewReader("[")
+					var output, stderr bytes.Buffer
+					cmd.Stdout = &output
+					cmd.Stderr = &stderr
+					if err := cmd.Run(); err != nil || output.String() != "{\"continue\":true}\n" || stderr.Len() != 0 {
+						t.Fatalf("packaged %s/%s: error=%v stdout=%q stderr=%q", event, name, err, output.String(), stderr.String())
+					}
+					if wantRun {
+						// Invalid stdin proves that the archived native binary ran,
+						// not just the command layer's neutral failure fallback.
+						data, err := os.ReadFile(filepath.Join(dir, "unused-data", "input-diagnostics.json"))
+						var observed struct {
+							Count int `json:"count"`
+						}
+						if err != nil || json.Unmarshal(data, &observed) != nil || observed.Count != 1 {
+							t.Fatal("WorkBuddy did not run archived binary with original stdin")
+						}
+					} else if _, err := os.Lstat(filepath.Join(dir, "unused-data")); !os.IsNotExist(err) {
+						t.Fatal("invalid primary ran a fallback or created state")
+					}
+				})
+			}
 		}
 	})
 }
