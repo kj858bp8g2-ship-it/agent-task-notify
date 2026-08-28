@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -26,21 +27,21 @@ func TestVersionAndUnknownArguments(t *testing.T) {
 			args:     nil,
 			wantCode: 2,
 			wantOut:  "",
-			wantErr:  "usage: agent-task-notify version\n",
+			wantErr:  testUsage,
 		},
 		{
 			name:     "unknown argument",
 			args:     []string{"synthetic-sensitive-value"},
 			wantCode: 2,
 			wantOut:  "",
-			wantErr:  "usage: agent-task-notify version\n",
+			wantErr:  testUsage,
 		},
 		{
 			name:     "extra argument",
 			args:     []string{"version", "extra"},
 			wantCode: 2,
 			wantOut:  "",
-			wantErr:  "usage: agent-task-notify version\n",
+			wantErr:  testUsage,
 		},
 	}
 
@@ -57,7 +58,17 @@ func TestVersionAndUnknownArguments(t *testing.T) {
 func TestUnknownArgumentsDoNotEcho(t *testing.T) {
 	var out, errout bytes.Buffer
 	code := Run([]string{"synthetic-sensitive-value"}, &out, &errout)
-	if code != 2 || out.String() != "" || errout.String() != "usage: agent-task-notify version\n" {
+	if code != 2 || out.String() != "" || errout.String() != testUsage || strings.Contains(errout.String(), "synthetic-sensitive-value") {
 		t.Fatalf("unsafe command response: code=%d", code)
 	}
 }
+
+const testUsage = `usage: agent-task-notify COMMAND
+  version
+  configure --provider bark|ntfy [--settings-file PATH] [--credential-stdin] [--data-directory PATH]
+  doctor [--data-directory PATH]
+  preview --agent ID [--send] [--data-directory PATH]
+  install --agent ID [--config-path PATH] [--command-shell posix|cmd|powershell] [--apply] [--data-directory PATH]
+  uninstall --agent ID [--apply] [--data-directory PATH]
+Credentials are entered locally; never paste credentials into agent chat.
+`

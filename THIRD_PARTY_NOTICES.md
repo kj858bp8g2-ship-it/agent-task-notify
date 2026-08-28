@@ -15,12 +15,20 @@ All icons can be overridden with a user-controlled HTTPS URL, disabled with an e
 
 ## Native security foundation dependencies
 
-The native secrets package pins `golang.org/x/sys v0.47.0` (Windows DPAPI)
+The native CLI pins `golang.org/x/sys v0.47.0` (Windows DPAPI),
+`golang.org/x/term v0.45.0` (local hidden terminal input),
 and `github.com/keybase/go-keychain v0.0.1` (macOS Keychain). The Windows
 package links x/sys/windows; the macOS package links go-keychain and Apple's
-system Security/CoreFoundation frameworks. The current minimal native CLI
-does not yet import the secrets package; this foundation is not a complete
-notification runtime. macOS execution remains an experimental CI gate.
+system Security/CoreFoundation frameworks. The CLI uses x/term's
+`IsTerminal` and `ReadPassword`; it does not implement its own terminal masking.
+macOS execution remains experimental; CI does not prove real Agent loading,
+phone delivery, signing, or notarization.
+
+The pinned x/term module checksum is
+`h1:NwWyBmoJCbfTHpxrWoZ9C6/VxOf7ic219I8xZZFdrf0=`; its go.mod checksum is
+`h1:9aqxs0blBcrm/n0L9QW0aRVD+ktan8ssZromtqJC43w=`.
+Its official source is [golang/term v0.45.0](https://github.com/golang/term/tree/v0.45.0).
+Both Go modules below carry the following complete BSD-3-Clause license.
 
 The go-keychain module also declares upstream test dependencies
 `github.com/stretchr/testify v1.10.0`, `github.com/davecgh/go-spew v1.1.1`,
@@ -31,7 +39,7 @@ and `golang.org/x/crypto v0.32.0`. These are not
 linked into this project's Windows/macOS secrets package; Linux support and
 running upstream system-Keychain tests are outside this foundation's scope.
 
-### golang.org/x/sys — BSD-3-Clause
+### golang.org/x/sys and golang.org/x/term — BSD-3-Clause
 
 Copyright 2009 The Go Authors.
 

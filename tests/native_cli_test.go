@@ -14,19 +14,8 @@ import (
 )
 
 func TestNativeCLIWithoutLanguageRuntime(t *testing.T) {
-	moduleRoot := filepath.Dir(mustGetwd(t))
 	temp := t.TempDir()
-	binaryName := "通知 工具"
-	if runtime.GOOS == "windows" {
-		binaryName += ".exe"
-	}
-	binaryPath := filepath.Join(temp, binaryName)
-
-	build := exec.Command("go", "build", "-trimpath", "-o", binaryPath, "./cmd/agent-task-notify")
-	build.Dir = moduleRoot
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build native command: %v\n%s", err, output)
-	}
+	binaryPath := nativeExecutable(t)
 
 	emptyPath := filepath.Join(temp, "empty-path")
 	if err := os.Mkdir(emptyPath, 0o700); err != nil {
@@ -73,8 +62,8 @@ func TestNativeCLIWithoutLanguageRuntime(t *testing.T) {
 	if got := string(unknownOutput); got != "" {
 		t.Fatalf("unknown command stdout = %q, want empty", got)
 	}
-	if got, want := unknownStderr.String(), "usage: agent-task-notify version\n"; got != want {
-		t.Fatalf("unknown command stderr = %q, want %q", got, want)
+	if got := unknownStderr.String(); !strings.HasPrefix(got, "usage: agent-task-notify COMMAND\n") || !strings.Contains(got, "configure --provider bark|ntfy") || strings.Contains(got, "synthetic-sensitive-value") {
+		t.Fatal("unknown command usage was incomplete or unsafe")
 	}
 	if after := runtimeEntries(t, runtimeRoot); !slices.Equal(before, after) {
 		t.Fatalf("unknown command changed synthetic runtime entries: before %q, after %q", before, after)
