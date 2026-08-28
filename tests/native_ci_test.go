@@ -27,10 +27,15 @@ func TestNativeCICanonicalPackages(t *testing.T) {
 		t.Fatal("dependent canonical package-check job missing")
 	}
 	build, check := parts[0], parts[1]
+	producer := strings.Split(build, "\n      - name: Build canonical unsigned candidate archive\n")
 	verification := strings.Split(check, "\n      - name: Verify and run the downloaded canonical archive\n")
-	if len(verification) != 2 || strings.Count(source, "ATN_PACKAGE_DIAGNOSTICS") != 1 ||
-		!strings.Contains(strings.SplitN(verification[1], "\n      - ", 2)[0], "\n        env:\n          ATN_PACKAGE_DIAGNOSTICS: ${{ runner.os == 'Windows' && '1' || '' }}\n        run: |") {
-		t.Fatal("package diagnostics must be opt-in only in the Windows consumer verification step")
+	if len(producer) != 2 || len(verification) != 2 || strings.Count(source, "ATN_PACKAGE_DIAGNOSTICS") != 2 {
+		t.Fatal("package diagnostics must be scoped to the two canonical package steps")
+	}
+	for _, step := range []string{producer[1], verification[1]} {
+		if !strings.Contains(strings.SplitN(step, "\n      - ", 2)[0], "\n        env:\n          ATN_PACKAGE_DIAGNOSTICS: ${{ runner.os == 'Windows' && '1' || '' }}\n        run: |") {
+			t.Fatal("package diagnostics must be opt-in only on Windows in each canonical package step")
+		}
 	}
 	for _, value := range []string{"needs: native", "contents: read", "actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53", "go run ./cmd/package-native verify", "--checksums", "--extract-to"} {
 		if !strings.Contains(check, value) {

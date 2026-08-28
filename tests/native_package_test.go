@@ -185,27 +185,129 @@ func TestNativePackage(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				_, stderr := run(t, false, "verify", "--SENSITIVE")
 				want := "native package rejected\n"
 				if value == "1" {
 					want = "native package stage: arguments\n" + want
 				}
-				if stderr != want {
-					t.Fatalf("diagnostic switch stderr=%q want=%q", stderr, want)
+				for _, operation := range []string{"verify", "build"} {
+					_, stderr := run(t, false, operation, "--SENSITIVE")
+					if stderr != want {
+						t.Fatalf("%s diagnostic switch stderr=%q want=%q", operation, stderr, want)
+					}
 				}
 			})
 		}
 		t.Setenv("ATN_PACKAGE_DIAGNOSTICS", "1")
-		t.Run("build-unchanged", func(t *testing.T) {
-			_, stderr := run(t, false, "build", "--SENSITIVE")
-			if stderr != "native package rejected\n" {
-				t.Fatalf("build emitted diagnostic: %q", stderr)
+		t.Run("build-off-default", func(t *testing.T) {
+			for _, value := range []string{"unset", "0"} {
+				t.Run(value, func(t *testing.T) {
+					t.Setenv("ATN_PACKAGE_DIAGNOSTICS", value)
+					if value == "unset" {
+						if err := os.Unsetenv("ATN_PACKAGE_DIAGNOSTICS"); err != nil {
+							t.Fatal(err)
+						}
+					}
+					buildArgs := append([]string(nil), args...)
+					buildArgs[len(buildArgs)-1] = filepath.Join(t.TempDir(), "new-build")
+					stdout, stderr := run(t, true, buildArgs...)
+					if stdout != "built "+name+"\n" || stderr != "" {
+						t.Fatalf("build behavior changed: %q %q", stdout, stderr)
+					}
+				})
 			}
-			buildArgs := append([]string(nil), args...)
-			buildArgs[len(buildArgs)-1] = filepath.Join(t.TempDir(), "new-build")
-			stdout, stderr := run(t, true, buildArgs...)
-			if stdout != "built "+name+"\n" || stderr != "" {
-				t.Fatalf("build behavior changed: %q %q", stdout, stderr)
+		})
+		t.Run("build-opt-in", func(t *testing.T) {
+			// Catch a missing/late stage, a failed check that continues, or
+			// input/native-error disclosure through real builder subprocesses.
+			prefix := "native package stage: arguments\nnative package stage: build-binary-read\nnative package stage: build-architecture\n"
+			sourcePair := "native package stage: build-source-read\nnative package stage: build-source-utf8\n"
+			// The fixed inventory has eleven source reads: the ninth parses
+			// the plugin descriptor and the eleventh checks launcher LF.
+			sourceSteps := strings.Repeat(sourcePair, 9) + "native package stage: build-plugin-json\n" + strings.Repeat(sourcePair, 2) + "native package stage: build-launcher-lf\n"
+			for _, kind := range []string{"binary-read", "architecture", "source-read", "source-utf8", "plugin-json", "launcher-lf", "output-parent", "success"} {
+				t.Run(kind, func(t *testing.T) {
+					v := append([]string(nil), args...)
+					v[len(v)-1] = filepath.Join(t.TempDir(), "SENSITIVE new-build")
+					want := prefix
+					switch kind {
+					case "binary-read":
+						v[4] = filepath.Join(t.TempDir(), "SENSITIVE absent-binary")
+						want = "native package stage: arguments\nnative package stage: build-binary-read\n"
+					case "architecture":
+						v[4] = filepath.Join(t.TempDir(), "SENSITIVE invalid-binary")
+						if os.WriteFile(v[4], []byte("SENSITIVE not executable"), 0600) != nil {
+							t.Fatal("diagnostic binary fixture")
+						}
+					case "source-read":
+						v[2] = filepath.Join(t.TempDir(), "SENSITIVE missing-source")
+						want += "native package stage: build-source-read\n"
+					case "source-utf8", "plugin-json", "launcher-lf":
+						// Copy only these nonsecret source members into a new
+						// test-owned root; never mutate the real source tree.
+						v[2] = filepath.Join(t.TempDir(), "SENSITIVE source")
+						for _, relative := range []string{
+							"docs/native-installation.md", "docs/native-installation.zh-CN.md", "LICENSE", "THIRD_PARTY_NOTICES.md",
+							"integrations/opencode/agent-task-notify.mjs", "integrations/opencode/bridge.mjs",
+							"skills/agent-task-notify/SKILL.md", "skills/agent-task-notify/agents/openai.yaml",
+							"integrations/workbuddy/.workbuddy-plugin/plugin.json", "integrations/workbuddy/native/hooks.json", "integrations/workbuddy/native/launch.sh",
+						} {
+							data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
+							if err != nil {
+								t.Fatal("diagnostic source read")
+							}
+							switch {
+							case kind == "source-utf8" && relative == "docs/native-installation.md":
+								data = []byte{0xff}
+							case kind == "plugin-json" && relative == "integrations/workbuddy/.workbuddy-plugin/plugin.json":
+								data = []byte("SENSITIVE invalid plugin")
+							case kind == "launcher-lf" && relative == "integrations/workbuddy/native/launch.sh":
+								data = []byte("SENSITIVE invalid\rlauncher")
+							}
+							path := filepath.Join(v[2], filepath.FromSlash(relative))
+							if os.MkdirAll(filepath.Dir(path), 0700) != nil || os.WriteFile(path, data, 0600) != nil {
+								t.Fatal("diagnostic source fixture")
+							}
+						}
+						switch kind {
+						case "source-utf8":
+							want += sourcePair
+						case "plugin-json":
+							want += strings.Repeat(sourcePair, 9) + "native package stage: build-plugin-json\n"
+						case "launcher-lf":
+							want += sourceSteps
+						}
+					case "output-parent", "success":
+						want += sourceSteps + "native package stage: build-manifest\nnative package stage: build-archive-encode\nnative package stage: build-output-root\nnative package stage: directory-parent\n"
+						if kind == "output-parent" {
+							v[len(v)-1] = filepath.Clean(t.TempDir())
+						} else {
+							want += "native package stage: directory-create\nnative package stage: build-archive-write\nnative package stage: build-checksums-write\nnative package stage: complete\n"
+						}
+					}
+					stdout, stderr := run(t, kind == "success", v...)
+					if kind != "success" {
+						want += "native package rejected\n"
+					}
+					if stderr != want || strings.Count(stderr, "\n") > 40 {
+						t.Fatalf("wrong build diagnostic boundary: %q", stderr)
+					}
+					if kind == "success" {
+						if stdout != "built "+name+"\n" {
+							t.Fatalf("build success stdout changed: %q", stdout)
+						}
+						built, err := os.ReadFile(filepath.Join(v[len(v)-1], name))
+						if err != nil || !bytes.Equal(built, archiveData) {
+							t.Fatal("diagnostics changed archive content")
+						}
+					} else if kind == "output-parent" {
+						children, err := os.ReadDir(v[len(v)-1])
+						if err != nil || len(children) != 0 {
+							t.Fatal("preexisting build output changed")
+						}
+					} else {
+						assertPackageAbsent(t, v[len(v)-1])
+					}
+				})
 			}
 		})
 		prefix := "native package stage: arguments\nnative package stage: target\nnative package stage: archive-read\nnative package stage: checksums-read\nnative package stage: checksum\n"

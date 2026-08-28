@@ -72,7 +72,7 @@ func main() {
 }
 
 func run(args []string) error {
-	diagnostics := packageDiagnostics(len(args) > 0 && args[0] == "verify" && os.Getenv("ATN_PACKAGE_DIAGNOSTICS") == "1")
+	diagnostics := packageDiagnostics(len(args) > 0 && (args[0] == "verify" || args[0] == "build") && os.Getenv("ATN_PACKAGE_DIAGNOSTICS") == "1")
 	diagnostics.stage("arguments")
 	if len(args) == 0 {
 		return errPackage
@@ -105,7 +105,7 @@ func run(args []string) error {
 		}
 	}
 	if args[0] == "build" {
-		return buildPackage(values)
+		return buildPackage(values, diagnostics)
 	}
 	return verifyPackage(values, diagnostics)
 }
@@ -215,10 +215,15 @@ func checkArchitecture(data []byte, platform string) error {
 	return nil
 }
 
-func buildPackage(v map[string]string) error {
+func buildPackage(v map[string]string, diagnostics packageDiagnostics) error {
 	platform := v["--platform"]
+	diagnostics.stage("build-binary-read")
 	binary, err := readRegular(v["--binary"], binaryLimit)
-	if err != nil || checkArchitecture(binary, platform) != nil {
+	if err != nil {
+		return errPackage
+	}
+	diagnostics.stage("build-architecture")
+	if checkArchitecture(binary, platform) != nil {
 		return errPackage
 	}
 	entries := inventory(platform)
@@ -245,11 +250,17 @@ func buildPackage(v map[string]string) error {
 		case "workbuddy/.workbuddy-plugin/plugin.json":
 			source = "integrations/workbuddy/.workbuddy-plugin/plugin.json"
 		}
+		diagnostics.stage("build-source-read")
 		e.data, err = readRegular(filepath.Join(v["--source-root"], filepath.FromSlash(source)), textLimit)
-		if err != nil || !utf8.Valid(e.data) {
+		if err != nil {
+			return errPackage
+		}
+		diagnostics.stage("build-source-utf8")
+		if !utf8.Valid(e.data) {
 			return errPackage
 		}
 		if e.name == "workbuddy/.workbuddy-plugin/plugin.json" {
+			diagnostics.stage("build-plugin-json")
 			object, err := strictjson.Object(e.data)
 			if err != nil {
 				return errPackage
@@ -262,12 +273,14 @@ func buildPackage(v map[string]string) error {
 			e.data = append(e.data, '\n')
 		}
 		if e.name == "workbuddy/hooks/launch.sh" {
+			diagnostics.stage("build-launcher-lf")
 			e.data = bytes.ReplaceAll(e.data, []byte("\r\n"), []byte("\n"))
 			if bytes.ContainsRune(e.data, '\r') {
 				return errPackage
 			}
 		}
 	}
+	diagnostics.stage("build-manifest")
 	m := manifest{1, candidateVersion, platform, digest(binary), names(entries)}
 	for i := range entries {
 		if entries[i].name == "manifest.json" {
@@ -278,17 +291,25 @@ func buildPackage(v map[string]string) error {
 			entries[i].data = append(entries[i].data, '\n')
 		}
 	}
+	diagnostics.stage("build-archive-encode")
 	data, err := encodeArchive(entries, platform)
 	if err != nil {
 		return err
 	}
-	if err := newOwnedDirectory(v["--output"], false); err != nil {
+	diagnostics.stage("build-output-root")
+	if err := newOwnedDirectory(v["--output"], diagnostics); err != nil {
 		return err
 	}
 	archive := filepath.Join(v["--output"], archiveName(platform))
-	if store.WriteAtomic(archive, data) != nil || store.WriteAtomic(filepath.Join(v["--output"], "SHA256SUMS"), []byte(digest(data)+"  "+filepath.Base(archive)+"\n")) != nil {
+	diagnostics.stage("build-archive-write")
+	if store.WriteAtomic(archive, data) != nil {
 		return errPackage
 	}
+	diagnostics.stage("build-checksums-write")
+	if store.WriteAtomic(filepath.Join(v["--output"], "SHA256SUMS"), []byte(digest(data)+"  "+filepath.Base(archive)+"\n")) != nil {
+		return errPackage
+	}
+	diagnostics.stage("complete")
 	fmt.Println("built", filepath.Base(archive))
 	return nil
 }

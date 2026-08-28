@@ -58,6 +58,8 @@ jobs:
         if: matrix.canonical
         id: candidate
         shell: pwsh
+        env:
+          ATN_PACKAGE_DIAGNOSTICS: ${{ runner.os == 'Windows' && '1' || '' }}
         run: |
           $candidate = Join-Path $env:RUNNER_TEMP 'atn-native-archive'
           $suffix = if ($env:RUNNER_OS -eq 'Windows') { '.exe' } else { '' }
