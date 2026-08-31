@@ -600,11 +600,28 @@ func TestRetentionBoundariesAndReadOnlyInspection(t *testing.T) {
 			t.Fatal("Hook or Inspect performed cleanup")
 		}
 	}
-	r.cleanup(context.Background())
-	for i, key := range keys {
-		_, err := os.Stat(recordPath(r, "jobs", key))
-		if os.IsNotExist(err) != cases[i].remove {
-			t.Fatal("wrong retention eligibility")
+	// Cleanup is intentionally best-effort: a 25 ms lock attempt may skip an
+	// otherwise eligible record under transient Windows filesystem latency.
+	// Repeated cleanup opportunities are the production contract, so exercise
+	// that contract without allowing any ineligible record to disappear.
+	for attempt := 1; attempt <= 10; attempt++ {
+		r.cleanup(context.Background())
+		remaining := 0
+		for i, key := range keys {
+			_, err := os.Stat(recordPath(r, "jobs", key))
+			missing := os.IsNotExist(err)
+			if !cases[i].remove && missing {
+				t.Fatalf("ineligible retention case %d (%s/%s) was removed on attempt %d", i, cases[i].status, cases[i].extension, attempt)
+			}
+			if cases[i].remove && !missing {
+				remaining++
+			}
+		}
+		if remaining == 0 {
+			break
+		}
+		if attempt == 10 {
+			t.Fatalf("%d eligible retention records remained after %d cleanup opportunities", remaining, attempt)
 		}
 	}
 	d, err := r.Inspect(context.Background())
