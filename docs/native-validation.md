@@ -10,10 +10,10 @@ Local source tests, exact-source GitHub Actions, canonical archive consumers, ta
 | --- | --- |
 | OpenClaw bridge fixtures and native adapter fixtures | Passed locally: 5 JS bridge cases plus Go normalization cases |
 | Hermes native adapter fixtures | Passed locally: lifecycle, child and malformed-shape cases |
-| Full Go, Node, PowerShell and release-scanner suites | Passed locally on Windows x64 and on exact implementation commit CI |
+| Full Go, Node, PowerShell and release-scanner suites | Passed locally on Windows x64 and on exact pre-tag source CI |
 | Windows x64 canonical archive build/verify with eight dry previews | Passed locally through black-box package tests |
-| Fresh five-platform native CI and legacy CI | Passed for implementation commit `27f7e6e` |
-| Canonical Windows/macOS consumer jobs | Passed for implementation commit `27f7e6e` |
+| Fresh five-platform native CI and legacy CI | Passed for pre-tag source commit `3a1f833` |
+| Canonical Windows/macOS consumer jobs | Passed for pre-tag source commit `3a1f833` |
 | Exact `v0.2.0-rc.2` tag publication | Pending authorization gates |
 | Downloaded four-asset release verification | Pending publication |
 | Real OpenClaw/Hermes host and phone E2E | Untested |
@@ -39,7 +39,17 @@ These are local Windows results from the working tree, not immutable commit, CI,
 - Legacy/offline workflow: [run `33407634834`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33407634834), passed in 3m24s.
 - Native candidate workflow: [run `33407634833`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33407634833), passed in 6m44s. Its five build/test jobs and five canonical package-consumer jobs all passed, covering Windows x64 plus the workflow's macOS and Linux matrices; Windows, Darwin amd64 and Darwin arm64 candidate artifacts were produced.
 
-The macOS jobs emitted the already-known compiler deprecation warning for the Keychain interaction API, and GitHub emitted Node.js action-runtime deprecation warnings. Neither warning changed the successful job conclusions. This documentation-only evidence commit must pass the same branch workflows before the release tag is created, so the immutable tag will include both the implementation and its recorded evidence.
+The macOS jobs emitted the already-known compiler deprecation warning for the Keychain interaction API, and GitHub emitted Node.js action-runtime deprecation warnings. Neither warning changed the successful job conclusions.
+
+## Pre-tag source CI and flaky-gate correction completed 2026-09-01
+
+- The first documentation evidence commit `d6dc43a` passed its [legacy run `33408451127`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33408451127), but [native run `33408451139`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33408451139) exposed an existing Windows-only flaky assertion in `TestRetentionBoundariesAndReadOnlyInspection`. One of two eligible records sometimes remained after a single 25 ms best-effort cleanup opportunity.
+- Commit [`3a1f8332404fed11debe3ddbba0af4dee9c7788e`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/commit/3a1f8332404fed11debe3ddbba0af4dee9c7788e) corrected the test to exercise the documented repeated-cleanup contract while still failing immediately if an ineligible record disappears. It did not loosen retention eligibility or change runtime delivery behavior.
+- The corrected test passed 200 consecutive local runs. A clean full serialized Go suite, `go mod verify`, `go vet`, the 12 OpenCode/OpenClaw bridge tests and the release scanner also passed locally.
+- Exact corrected-source legacy workflow: [run `33411330046`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33411330046), passed in 3m49s.
+- Exact corrected-source native workflow: [run `33411330068`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33411330068), passed in 8m00s; all five build/test and five package-consumer jobs passed.
+
+This final documentation-only evidence commit must pass the same branch workflows before the release tag is created, so the immutable tag will include the OpenClaw/Hermes implementation, the corrected retention gate and their recorded evidence.
 
 ## Evidence boundaries
 
