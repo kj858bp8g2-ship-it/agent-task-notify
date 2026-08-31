@@ -10,10 +10,10 @@ Local source tests, exact-source GitHub Actions, canonical archive consumers, ta
 | --- | --- |
 | OpenClaw bridge fixtures and native adapter fixtures | Passed locally: 5 JS bridge cases plus Go normalization cases |
 | Hermes native adapter fixtures | Passed locally: lifecycle, child and malformed-shape cases |
-| Full Go, Node, PowerShell and release-scanner suites | Passed locally on Windows x64; exact-source CI still required |
+| Full Go, Node, PowerShell and release-scanner suites | Passed locally on Windows x64 and on exact implementation commit CI |
 | Windows x64 canonical archive build/verify with eight dry previews | Passed locally through black-box package tests |
-| Fresh five-platform native CI and legacy CI | Pending push |
-| Canonical Windows/macOS consumer jobs | Pending push |
+| Fresh five-platform native CI and legacy CI | Passed for implementation commit `27f7e6e` |
+| Canonical Windows/macOS consumer jobs | Passed for implementation commit `27f7e6e` |
 | Exact `v0.2.0-rc.2` tag publication | Pending authorization gates |
 | Downloaded four-asset release verification | Pending publication |
 | Real OpenClaw/Hermes host and phone E2E | Untested |
@@ -32,6 +32,14 @@ Local source tests, exact-source GitHub Actions, canonical archive consumers, ta
 - The Windows package test built the actual native binary/archive, required four byte-identical executable copies, checked the fixed manifest/list/modes/limits, extracted into an isolated root, ran version and doctor, and ran dry previews for all eight Agent IDs. It did not configure a provider or send a phone notification.
 
 These are local Windows results from the working tree, not immutable commit, CI, tag, Mac, release-asset, real-host or phone evidence. The table above remains explicit about those pending gates.
+
+## Exact implementation-source CI completed 2026-08-31
+
+- Implementation source commit: [`27f7e6e6d06542d9b02e72475d3e127fd31c6f1d`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/commit/27f7e6e6d06542d9b02e72475d3e127fd31c6f1d).
+- Legacy/offline workflow: [run `33407634834`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33407634834), passed in 3m24s.
+- Native candidate workflow: [run `33407634833`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33407634833), passed in 6m44s. Its five build/test jobs and five canonical package-consumer jobs all passed, covering Windows x64 plus the workflow's macOS and Linux matrices; Windows, Darwin amd64 and Darwin arm64 candidate artifacts were produced.
+
+The macOS jobs emitted the already-known compiler deprecation warning for the Keychain interaction API, and GitHub emitted Node.js action-runtime deprecation warnings. Neither warning changed the successful job conclusions. This documentation-only evidence commit must pass the same branch workflows before the release tag is created, so the immutable tag will include both the implementation and its recorded evidence.
 
 ## Evidence boundaries
 
