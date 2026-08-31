@@ -6,7 +6,7 @@ This candidate adds experimental manual OpenClaw and Hermes Agent integrations a
 
 Local source tests, exact-source GitHub Actions, canonical archive consumers, tag publication and downloaded release-asset verification are separate gates. This document is intentionally updated with exact commit/run/artifact evidence only after each gate succeeds. Until then, the compatibility table marks the corresponding rc.2 rows as required rather than borrowing results from `0.2.0-rc.1`.
 
-| Gate | Status before publication |
+| Gate | Status |
 | --- | --- |
 | OpenClaw bridge fixtures and native adapter fixtures | Passed locally: 5 JS bridge cases plus Go normalization cases |
 | Hermes native adapter fixtures | Passed locally: lifecycle, child and malformed-shape cases |
@@ -14,8 +14,8 @@ Local source tests, exact-source GitHub Actions, canonical archive consumers, ta
 | Windows x64 canonical archive build/verify with eight dry previews | Passed locally through black-box package tests |
 | Fresh five-platform native CI and legacy CI | Passed for pre-tag source commit `3a1f833` |
 | Canonical Windows/macOS consumer jobs | Passed for pre-tag source commit `3a1f833` |
-| Exact `v0.2.0-rc.2` tag publication | Pending authorization gates |
-| Downloaded four-asset release verification | Pending publication |
+| Exact `v0.2.0-rc.2` tag publication | Passed; tag peels to `3d88a88` |
+| Downloaded four-asset release verification | Passed; all release checksums matched |
 | Real OpenClaw/Hermes host and phone E2E | Untested |
 
 ## Contract and privacy evidence
@@ -49,7 +49,14 @@ The macOS jobs emitted the already-known compiler deprecation warning for the Ke
 - Exact corrected-source legacy workflow: [run `33411330046`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33411330046), passed in 3m49s.
 - Exact corrected-source native workflow: [run `33411330068`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33411330068), passed in 8m00s; all five build/test and five package-consumer jobs passed.
 
-This final documentation-only evidence commit must pass the same branch workflows before the release tag is created, so the immutable tag will include the OpenClaw/Hermes implementation, the corrected retention gate and their recorded evidence.
+The final pre-tag evidence commit [`3d88a88`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/commit/3d88a88b71226fcb5e026f8f33928c0203152f5b) then passed [legacy run `33422783886`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33422783886) in 3m27s and [native run `33422783832`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33422783832) in 5m17s, including both five-job matrices. The immutable tag therefore contains the OpenClaw/Hermes implementation, the corrected retention gate and their pre-publication evidence.
+
+## Publication and independent download verification completed 2026-09-01
+
+- Annotated tag [`v0.2.0-rc.2`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/releases/tag/v0.2.0-rc.2) peels to `3d88a88`. Its independent tag-push [legacy run `33423401404`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33423401404) passed in 3m26s.
+- The [native prerelease workflow `33423405193`](https://github.com/kj858bp8g2-ship-it/agent-task-notify/actions/runs/33423405193) passed in 7m56s. From tag source it reran legacy, all five native build/test jobs, all five package-consumer jobs, exact archive/source inspection and the guarded publish job.
+- All four authored release assets were downloaded again from the public Release. Their SHA-256 values matched the downloaded `SHA256SUMS`: Darwin amd64 `a43025a421e325886a73aec10a77b05ffe099b78ed9af939997453b4df3e6a70`, Darwin arm64 `a7fb60cdae31a50004f7c4188b23f130c30b1d78ca814757a507d9dfdb7515fd`, and Windows amd64 `06ba9a14f2689e1fa433a20790ed684efa25ae6cc9b33f34116677de2fafa46e`. The checksum asset itself matched the Release page digest `9ca34b30b49dae4791863acc5cd260220346bc4025cfdf0dd29c177f78cbd080`.
+- The freshly downloaded Windows archive additionally passed the developer verifier from this checkout: exact inventory/manifest, four identical binaries, isolated `version`, `doctor` and all eight dry previews. No provider was configured and no phone notification was sent. The downloaded Mac archives were hash-verified locally but not executed on this Windows machine; matching-system execution evidence is the workflow's macOS consumer jobs.
 
 ## Evidence boundaries
 
