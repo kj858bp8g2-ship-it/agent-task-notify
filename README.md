@@ -1,6 +1,6 @@
 # Agent Task Notify
 
-Phone notifications for long local tasks in Codex, Claude Code, Cursor, Gemini CLI, OpenCode, and experimental WorkBuddy. Native `0.2.0-rc.1` targets Windows x64 and experimental Mac Intel/Apple Silicon; Bark/iOS and experimental ntfy/Android. This project is not affiliated with any Agent or notification provider.
+Phone notifications for long local tasks in Codex, Claude Code, Cursor, Gemini CLI, OpenCode, and experimental WorkBuddy, OpenClaw, and Hermes Agent integrations. Native `0.2.0-rc.2` targets Windows x64 and experimental Mac Intel/Apple Silicon; Bark/iOS and experimental ntfy/Android. This project is not affiliated with any Agent or notification provider.
 
 ## Native candidate quick start
 
@@ -9,7 +9,7 @@ Start with [native installation](docs/native-installation.md) ([中文](docs/nat
 1. Get the reviewed exact candidate package from this repository, verify provenance and SHA256SUMS, and extract into a new owned folder. Never overwrite a live installation.
 2. Ask a capable local Agent to use the packaged Skill, or follow INSTALL yourself: confirm platform, separate owned data path, host shell, target and trust. A repository link/Skill does not auto-install or start a daemon.
 3. Run the native executable's `version`, `doctor --data-directory ABS_DATA` and dry `preview --agent codex --data-directory ABS_DATA`. These do not authenticate credentials or prove host loading.
-4. Configure the chosen provider with `configure --provider bark --data-directory ABS_DATA` (or `ntfy`) and enter credentials only at the local hidden prompt. Preview installation before authorized `--apply`; WorkBuddy uses its manual complete package.
+4. Configure the chosen provider with `configure --provider bark --data-directory ABS_DATA` (or `ntfy`) and enter credentials only at the local hidden prompt. Preview installation before authorized `--apply`; WorkBuddy, OpenClaw, and Hermes use their packaged manual experimental integrations.
 5. Only when requested, use `preview --agent codex --send --data-directory ABS_DATA` for an optional audible test. Queued/accepted is not phone arrival. Enabled hooks also send after thresholds.
 
 Default eligibility is 1800 seconds, long-task threshold 3600, Bark targets 45/60 seconds with `alarm`; all are tunable. Continuous Bark may produce two notifications, with approximate timing. ntfy sound is phone-controlled, not a call. No adapter guarantees every `needs_attention` moment. No extra telemetry, live legacy auto-migration, offline/reboot or exactly-once guarantee is provided. Never paste keys, tokens or private endpoints into chat. Native and legacy routes must not be enabled together.

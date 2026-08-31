@@ -1,10 +1,12 @@
 # Privacy
 
-## Native 0.2.0-rc.1
+## Native 0.2.0-rc.2
 
 Native credentials are entered only in a local hidden prompt (or explicitly authorized local `--credential-stdin`), never chat, command arguments or pasted config. Windows uses CurrentUser DPAPI; experimental Mac uses a non-synchronizing Keychain key with authenticated encrypted files, not a key beside ciphertext or a `security` CLI production fallback. Data lives in the separate `AgentTaskNotifyNative` root, outside package/source/legacy data. Only explicit configuration or foreground Vault operations in authorized applied installation/removal can create/authorize a key; background/readonly credential reads never prompt, and doctor/dry preview only view syntactic settings/envelope presence without decryption/Keychain.
 
 Task text, raw Hook input, native session/run IDs, full URLs, tokens, response bodies and underlying exception text do not enter native logs. State keys are hashed; generic notification content and frozen Agent artwork go to the chosen provider. No extra telemetry is added. Protected host backups retain exact original bytes (which may contain secrets) in private data: host input limit 4 MiB, encrypted backup envelope 6 MiB. They are manual recovery material, not a stale whole-file uninstall restore. Keep original package identity until receipt-owned uninstall is complete; never automatically delete data/user folders/Keychain items or migrate live legacy credentials/hooks.
+
+OpenClaw grants its lifecycle hooks access to a host event that may contain conversation data, so installation requires an explicit host permission. The packaged bridge discards prompts, messages, tool data and model output and sends only schema version, lifecycle state, session ID and a local run ID to the native process. Hermes Shell Hooks likewise receive a broader host envelope; native normalization retains only the event name, session/turn identifiers and terminal booleans. These are local minimization boundaries, not claims that the host never constructs or exposes the larger event before this project receives it.
 
 Installation/configuration/doctor/dry preview do not send. Explicit `preview --send` or enabled lifecycle hooks can send; acceptance is not phone arrival. There is no exactly-once delivery, replay daemon, offline or restart guarantee. Source isolation checks only exact ancestor markers, not arbitrary source enumeration or a universal leak guarantee. Current-user private roots/files remain mandatory even when an OS-owned ancestor is trusted. The source release scanner below is heuristic, and hashes prove integrity only relative to trusted provenance, not publisher identity.
 

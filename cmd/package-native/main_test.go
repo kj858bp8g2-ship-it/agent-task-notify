@@ -25,9 +25,18 @@ func darwinFixtureEntries(t *testing.T) []entry {
 		{"THIRD_PARTY_NOTICES.md", []byte("notices\n"), 0644},
 		{"UNSIGNED-CANDIDATE.txt", []byte("UNSIGNED CANDIDATE — experimental CI test artifact only.\nNot signed or notarized for end-user distribution. Stop if macOS blocks execution; do not bypass Gatekeeper or remove quarantine.\nRead packaged INSTALL.md or INSTALL.zh-CN.md for the explicit experimental setup and evidence boundaries.\n"), 0644},
 		{"agent-task-notify", binary, 0755},
+		{"hermes/README.md", []byte("hermes\n"), 0644},
+		{"hermes/config.example.yaml", []byte("hooks: {}\n"), 0644},
+		{"hermes/runtime/agent-task-notify", binary, 0755},
 		{"integrations/opencode/agent-task-notify.mjs", []byte("export {}\n"), 0644},
 		{"integrations/opencode/bridge.mjs", []byte("export {}\n"), 0644},
 		{"manifest.json", []byte("{}\n"), 0644},
+		{"openclaw/README.md", []byte("openclaw\n"), 0644},
+		{"openclaw/bridge.mjs", []byte("export {}\n"), 0644},
+		{"openclaw/index.js", []byte("export {}\n"), 0644},
+		{"openclaw/openclaw.plugin.json", []byte("{}\n"), 0644},
+		{"openclaw/package.json", []byte("{\"version\":\"0.2.0-rc.2\"}\n"), 0644},
+		{"openclaw/runtime/agent-task-notify", binary, 0755},
 		{"skills/agent-task-notify/SKILL.md", []byte("skill\n"), 0644},
 		{"skills/agent-task-notify/agents/openai.yaml", []byte("name: test\n"), 0644},
 		{"workbuddy/.workbuddy-plugin/plugin.json", []byte("{}\n"), 0644},
@@ -40,7 +49,7 @@ func darwinFixtureEntries(t *testing.T) []entry {
 		files = append(files, e.name)
 	}
 	sum := sha256.Sum256(binary)
-	m, err := json.Marshal(map[string]any{"schemaVersion": 1, "version": "0.2.0-rc.1", "platform": "darwin-amd64", "binarySHA256": hex.EncodeToString(sum[:]), "files": files})
+	m, err := json.Marshal(map[string]any{"schemaVersion": 1, "version": "0.2.0-rc.2", "platform": "darwin-amd64", "binarySHA256": hex.EncodeToString(sum[:]), "files": files})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,12 +111,12 @@ func emptyMetadataHeader(kind byte) []byte {
 
 func TestDecodeDarwinArchiveExpandedMetadataBudget(t *testing.T) {
 	// Removing the pre-tar aggregate budget accepts these otherwise canonical
-	// inventories after consuming more than 221 MiB of hidden metadata.
+	// inventories after consuming more than 421 MiB of hidden metadata.
 	for _, kind := range []byte{tar.TypeXHeader, tar.TypeGNULongName} {
 		t.Run(string(kind), func(t *testing.T) {
 			data := gzipFixture(t, func(w io.Writer) {
 				block := bytes.Repeat(emptyMetadataHeader(kind), 128)
-				const headers = 221*1024*1024/512 + 1
+				const headers = 421*1024*1024/512 + 1
 				for left := headers; left > 0; {
 					n := min(left, 128)
 					if _, err := w.Write(block[:n*512]); err != nil {
@@ -118,7 +127,7 @@ func TestDecodeDarwinArchiveExpandedMetadataBudget(t *testing.T) {
 				writeFixtureTar(t, w)
 			})
 			if _, err := decodeArchive(data, "darwin-amd64"); err == nil {
-				t.Fatal("accepted archive with over 221 MiB of expanded metadata")
+				t.Fatal("accepted archive with over 421 MiB of expanded metadata")
 			}
 		})
 	}

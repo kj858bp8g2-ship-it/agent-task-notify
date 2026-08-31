@@ -271,7 +271,7 @@ func runInstall(o commandOptions, r *notify.Runtime, stdout, stderr io.Writer) i
 	if err != nil && !errors.Is(err, install.ErrParentRequired) {
 		switch {
 		case errors.Is(err, install.ErrManualPackageRequired):
-			fmt.Fprintln(stderr, "WorkBuddy requires the manual experimental self-contained package")
+			fmt.Fprintf(stderr, "%s requires its manual experimental integration package\n", o.agent)
 		case errors.Is(err, install.ErrShellRequired):
 			fmt.Fprintln(stderr, "select the host's verified command shell with --command-shell")
 		default:

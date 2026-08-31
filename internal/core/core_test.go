@@ -61,14 +61,14 @@ func TestEmbeddedResourcesAndAgentsAreIndependent(t *testing.T) {
 		t.Fatal("icons returned shared bytes")
 	}
 	agents := core.Agents()
-	if len(agents) != 6 {
+	if len(agents) != 8 {
 		t.Fatalf("agents=%d", len(agents))
 	}
 	agents[0].ID = "changed"
 	if core.Agents()[0].ID == "changed" {
 		t.Fatal("agents returned shared slice")
 	}
-	for _, id := range []string{"codex", "claude-code", "cursor", "gemini-cli", "opencode", "workbuddy"} {
+	for _, id := range []string{"codex", "claude-code", "cursor", "gemini-cli", "opencode", "workbuddy", "openclaw", "hermes"} {
 		a, err := core.AgentByID(id)
 		if err != nil || a.ID != id || !strings.HasPrefix(a.IconURL, "https://") {
 			t.Fatalf("agent %s: %#v %v", id, a, err)

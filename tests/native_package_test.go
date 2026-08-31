@@ -60,7 +60,7 @@ func TestNativeGuideContract(t *testing.T) {
 	}
 	for _, path := range []string{"docs/native-installation.md", "skills/agent-task-notify/SKILL.md"} {
 		guide := nativeSourceText(t, path)
-		for _, value := range []string{"0.2.0-rc.1", "Windows", "Mac", "experimental", "bark", "ntfy", "Android", "iOS", "version", "configure", "doctor", "preview", "install", "uninstall", "--data-directory", "--send", "--apply", "1800", "3600", "45", "60", "alarm", "needs_attention", "chat"} {
+		for _, value := range []string{"0.2.0-rc.2", "Windows", "Mac", "experimental", "bark", "ntfy", "Android", "iOS", "version", "configure", "doctor", "preview", "install", "uninstall", "--data-directory", "--send", "--apply", "1800", "3600", "45", "60", "alarm", "needs_attention", "chat"} {
 			if !strings.Contains(guide, value) {
 				t.Errorf("%s missing installed contract %q", path, value)
 			}
@@ -81,7 +81,7 @@ func TestNativeGuideContract(t *testing.T) {
 func TestNativeReleaseWorkflowContract(t *testing.T) {
 	source := nativeSourceText(t, ".github/workflows/native-release.yml")
 	pre, jobs, ok := strings.Cut(source, "\njobs:\n")
-	if !ok || !strings.Contains(pre, "on:\n  push:\n    tags: ['v0.2.0-rc.1']\n  workflow_dispatch:\n") || !strings.Contains(pre, "permissions:\n  contents: read\n") {
+	if !ok || !strings.Contains(pre, "on:\n  push:\n    tags: ['v0.2.0-rc.2']\n  workflow_dispatch:\n") || !strings.Contains(pre, "permissions:\n  contents: read\n") {
 		t.Fatal("release triggers/default permission not exact")
 	}
 	for _, banned := range []string{"branches:", "pull_request", "schedule:", "workflow_call:", "write-all", "secrets:", "continue-on-error", "always()", "quarantine", "xattr", "spctl", "--clobber"} {
@@ -101,13 +101,13 @@ func TestNativeReleaseWorkflowContract(t *testing.T) {
 		t.Fatalf("unreviewed job set: %v", got)
 	}
 	for _, job := range []struct{ name, path string }{{"native", "native.yml"}, {"legacy", "test.yml"}} {
-		want := "  " + job.name + ":\n    if: github.ref == 'refs/tags/v0.2.0-rc.1'\n    uses: ./.github/workflows/" + job.path + "\n"
+		want := "  " + job.name + ":\n    if: github.ref == 'refs/tags/v0.2.0-rc.2'\n    uses: ./.github/workflows/" + job.path + "\n"
 		if !strings.Contains(jobs, want) {
 			t.Errorf("missing exact-tag reusable gate %s", job.name)
 		}
 	}
 	_, publish, _ := strings.Cut(jobs, "  publish:\n")
-	if !strings.Contains(publish, "    needs: [native, legacy]\n    if: github.ref == 'refs/tags/v0.2.0-rc.1' && success()\n    permissions:\n      contents: write\n") || strings.Count(source, "contents: write") != 1 {
+	if !strings.Contains(publish, "    needs: [native, legacy]\n    if: github.ref == 'refs/tags/v0.2.0-rc.2' && success()\n    permissions:\n      contents: write\n") || strings.Count(source, "contents: write") != 1 {
 		t.Fatal("publication must be the only writer and depend on both complete gates")
 	}
 	if strings.Count(publish, "actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53") != 3 || !strings.Contains(publish, "actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803") {
@@ -164,7 +164,7 @@ func nativeReleasePython(t *testing.T, script, dir string, args ...string) (stri
 	defer cancel()
 	cmd := exec.CommandContext(ctx, python, append([]string{"-I", "-c", script}, args...)...)
 	cmd.Dir = dir
-	cmd.Env = append(withoutEnvironmentNames(os.Environ(), "GITHUB_REF", "GITHUB_REPOSITORY", "GH_TOKEN"), "GITHUB_REF=refs/tags/v0.2.0-rc.1", "GITHUB_REPOSITORY=kj858bp8g2-ship-it/agent-task-notify")
+	cmd.Env = append(withoutEnvironmentNames(os.Environ(), "GITHUB_REF", "GITHUB_REPOSITORY", "GH_TOKEN"), "GITHUB_REF=refs/tags/v0.2.0-rc.2", "GITHUB_REPOSITORY=kj858bp8g2-ship-it/agent-task-notify")
 	output, err := cmd.CombinedOutput()
 	return string(output), err
 }
@@ -180,7 +180,7 @@ def fake_run(argv, **kwargs):
     calls.append(argv)
     assert argv[0] == "gh" and kwargs.get("capture_output") and kwargs.get("timeout")
     if argv[1:3] == ["release", "view"]:
-        return subprocess.CompletedProcess(argv, 0 if scenario == "exists" else 1, '{"tagName":"v0.2.0-rc.1"}', '')
+        return subprocess.CompletedProcess(argv, 0 if scenario == "exists" else 1, '{"tagName":"v0.2.0-rc.2"}', '')
     if argv[1:3] == ["api", "--method"] and argv[-1] == "repos/kj858bp8g2-ship-it/agent-task-notify":
         return subprocess.CompletedProcess(argv, 1 if scenario == "auth" else 0, '{"full_name":"kj858bp8g2-ship-it/agent-task-notify"}', '')
     if argv[1] == "api":
@@ -203,9 +203,9 @@ creates = [c for c in calls if c[1:3] == ["release", "create"]]
 assert len(creates) == (1 if scenario in ("absent", "create-fails") else 0), calls
 if creates:
     c = creates[0]
-    assert c[3] == "v0.2.0-rc.1" and "--verify-tag" in c and "--prerelease" in c
+    assert c[3] == "v0.2.0-rc.2" and "--verify-tag" in c and "--prerelease" in c
     assert c[c.index("--repo")+1] == "kj858bp8g2-ship-it/agent-task-notify"
-    for name in ("atn-native-0.2.0-rc.1-windows-amd64.zip", "atn-native-0.2.0-rc.1-darwin-amd64.tar.gz", "atn-native-0.2.0-rc.1-darwin-arm64.tar.gz"):
+    for name in ("atn-native-0.2.0-rc.2-windows-amd64.zip", "atn-native-0.2.0-rc.2-darwin-amd64.tar.gz", "atn-native-0.2.0-rc.2-darwin-arm64.tar.gz"):
         assert sum(a.endswith('/'+name) for a in c) == 1, c
     assert "SHA256SUMS" in c and "--clobber" not in c
 print('publication policy passed: '+scenario)
@@ -229,12 +229,12 @@ func TestNativeReleaseArchiveInspection(t *testing.T) {
 			if err := os.MkdirAll(filepath.Join(dir, "internal", "cli"), 0700); err != nil {
 				t.Fatal(err)
 			}
-			source := "package cli\nconst Version = \"0.2.0-rc.1\"\n"
+			source := "package cli\nconst Version = \"0.2.0-rc.2\"\n"
 			if fault == "source-version" {
 				source = "package cli\nconst Version = \"0.2.0-dev\"\n"
 			}
 			if fault == "duplicate-version" {
-				source += "const Version = \"0.2.0-rc.1\"\n"
+				source += "const Version = \"0.2.0-rc.2\"\n"
 			}
 			if err := os.WriteFile(filepath.Join(dir, "internal", "cli", "app.go"), []byte(source), 0600); err != nil {
 				t.Fatal(err)
@@ -245,18 +245,14 @@ func TestNativeReleaseArchiveInspection(t *testing.T) {
 				if platform == "windows-amd64" {
 					binary, suffix = binary+".exe", ".zip"
 				}
-				asset := "atn-native-0.2.0-rc.1-" + platform + suffix
+				asset := "atn-native-0.2.0-rc.2-" + platform + suffix
 				out := filepath.Join(dir, "candidate", platform)
 				if err := os.MkdirAll(out, 0700); err != nil {
 					t.Fatal(err)
 				}
 				var entries []packageEntry
-				for _, name := range []string{binary, "LICENSE", "THIRD_PARTY_NOTICES.md", "manifest.json", "INSTALL.md", "INSTALL.zh-CN.md", "skills/agent-task-notify/SKILL.md", "skills/agent-task-notify/agents/openai.yaml", "integrations/opencode/agent-task-notify.mjs", "integrations/opencode/bridge.mjs", "workbuddy/.workbuddy-plugin/plugin.json", "workbuddy/hooks/hooks.json", "workbuddy/hooks/launch.sh", "workbuddy/runtime/" + binary} {
-					mode := os.FileMode(0644)
-					if name == binary || name == "workbuddy/runtime/"+binary || name == "workbuddy/hooks/launch.sh" {
-						mode = 0755
-					}
-					entries = append(entries, packageEntry{name, []byte("synthetic non-executable fixture"), mode, false})
+				for _, name := range nativePackageNames(binary) {
+					entries = append(entries, packageEntry{name, []byte("synthetic non-executable fixture"), nativePackageMode(name, binary), false})
 				}
 				if platform != "windows-amd64" {
 					entries = append(entries, packageEntry{"UNSIGNED-CANDIDATE.txt", []byte("UNSIGNED and NOT NOTARIZED"), 0644, false})
@@ -267,7 +263,7 @@ func TestNativeReleaseArchiveInspection(t *testing.T) {
 				}
 				sort.Strings(names)
 				digest := sha256.Sum256(entries[0].data)
-				manifest := map[string]any{"schemaVersion": 1, "version": "0.2.0-rc.1", "platform": platform, "binarySHA256": hex.EncodeToString(digest[:]), "files": names}
+				manifest := map[string]any{"schemaVersion": 1, "version": "0.2.0-rc.2", "platform": platform, "binarySHA256": hex.EncodeToString(digest[:]), "files": names}
 				if platform == "windows-amd64" {
 					switch fault {
 					case "manifest-version":
@@ -344,6 +340,72 @@ type packageEntry struct {
 	link bool
 }
 
+func nativePackageNames(binary string) []string {
+	return []string{
+		binary, "LICENSE", "THIRD_PARTY_NOTICES.md", "manifest.json", "INSTALL.md", "INSTALL.zh-CN.md",
+		"skills/agent-task-notify/SKILL.md", "skills/agent-task-notify/agents/openai.yaml",
+		"integrations/opencode/agent-task-notify.mjs", "integrations/opencode/bridge.mjs",
+		"workbuddy/.workbuddy-plugin/plugin.json", "workbuddy/hooks/hooks.json", "workbuddy/hooks/launch.sh", "workbuddy/runtime/" + binary,
+		"openclaw/README.md", "openclaw/package.json", "openclaw/openclaw.plugin.json", "openclaw/index.js", "openclaw/bridge.mjs", "openclaw/runtime/" + binary,
+		"hermes/README.md", "hermes/config.example.yaml", "hermes/runtime/" + binary,
+	}
+}
+
+func nativePackageMode(name, binary string) os.FileMode {
+	if name == binary || name == "workbuddy/hooks/launch.sh" || strings.HasSuffix(name, "/runtime/"+binary) {
+		return 0755
+	}
+	return 0644
+}
+
+type nativePackageSource struct {
+	name       string
+	source     string
+	pluginJSON bool
+	launcherLF bool
+}
+
+func nativePackageSources() []nativePackageSource {
+	return []nativePackageSource{
+		{"INSTALL.md", "docs/native-installation.md", false, false},
+		{"INSTALL.zh-CN.md", "docs/native-installation.zh-CN.md", false, false},
+		{"LICENSE", "LICENSE", false, false},
+		{"THIRD_PARTY_NOTICES.md", "THIRD_PARTY_NOTICES.md", false, false},
+		{"hermes/README.md", "integrations/hermes/README.md", false, false},
+		{"hermes/config.example.yaml", "integrations/hermes/config.example.yaml", false, false},
+		{"integrations/opencode/agent-task-notify.mjs", "integrations/opencode/agent-task-notify.mjs", false, false},
+		{"integrations/opencode/bridge.mjs", "integrations/opencode/bridge.mjs", false, false},
+		{"openclaw/README.md", "integrations/openclaw/README.md", false, false},
+		{"openclaw/bridge.mjs", "integrations/openclaw/bridge.mjs", false, false},
+		{"openclaw/index.js", "integrations/openclaw/index.js", false, false},
+		{"openclaw/openclaw.plugin.json", "integrations/openclaw/openclaw.plugin.json", false, false},
+		{"openclaw/package.json", "integrations/openclaw/package.json", true, false},
+		{"skills/agent-task-notify/SKILL.md", "skills/agent-task-notify/SKILL.md", false, false},
+		{"skills/agent-task-notify/agents/openai.yaml", "skills/agent-task-notify/agents/openai.yaml", false, false},
+		{"workbuddy/.workbuddy-plugin/plugin.json", "integrations/workbuddy/.workbuddy-plugin/plugin.json", true, false},
+		{"workbuddy/hooks/hooks.json", "integrations/workbuddy/native/hooks.json", false, false},
+		{"workbuddy/hooks/launch.sh", "integrations/workbuddy/native/launch.sh", false, true},
+	}
+}
+
+func nativeBuildSourceSteps(stopAfter string) string {
+	const sourcePair = "native package stage: build-source-read\nnative package stage: build-source-utf8\n"
+	var result strings.Builder
+	for _, source := range nativePackageSources() {
+		result.WriteString(sourcePair)
+		if source.pluginJSON {
+			result.WriteString("native package stage: build-plugin-json\n")
+		}
+		if source.launcherLF {
+			result.WriteString("native package stage: build-launcher-lf\n")
+		}
+		if source.name == stopAfter {
+			break
+		}
+	}
+	return result.String()
+}
+
 // Removing any safety gate, leaking extra source files, or running the source
 // binary instead of the archived executable must fail these black-box checks.
 func TestNativePackage(t *testing.T) {
@@ -370,11 +432,11 @@ func TestNativePackage(t *testing.T) {
 		t.Fatal("actual package caller selection", err, selected)
 	}
 	out := strings.TrimSpace(selected)
-	args := []string{"build", "--source-root", root, "--binary", binary, "--platform", platform, "--version", "0.2.0-rc.1", "--output", out}
+	args := []string{"build", "--source-root", root, "--binary", binary, "--platform", platform, "--version", "0.2.0-rc.2", "--output", out}
 	packageRun(t, tool, true, args...)
-	name := "atn-native-0.2.0-rc.1-" + platform + ".tar.gz"
+	name := "atn-native-0.2.0-rc.2-" + platform + ".tar.gz"
 	if runtime.GOOS == "windows" {
-		name = "atn-native-0.2.0-rc.1-" + platform + ".zip"
+		name = "atn-native-0.2.0-rc.2-" + platform + ".zip"
 	}
 	archive := filepath.Join(out, name)
 	sums := filepath.Join(out, "SHA256SUMS")
@@ -392,7 +454,7 @@ func TestNativePackage(t *testing.T) {
 	}
 	entries := packageRead(t, archiveData, runtime.GOOS == "windows")
 	binaryName := "agent-task-notify" + exeSuffix()
-	want := []string{binaryName, "LICENSE", "THIRD_PARTY_NOTICES.md", "manifest.json", "INSTALL.md", "INSTALL.zh-CN.md", "skills/agent-task-notify/SKILL.md", "skills/agent-task-notify/agents/openai.yaml", "integrations/opencode/agent-task-notify.mjs", "integrations/opencode/bridge.mjs", "workbuddy/.workbuddy-plugin/plugin.json", "workbuddy/hooks/hooks.json", "workbuddy/hooks/launch.sh", "workbuddy/runtime/" + binaryName}
+	want := nativePackageNames(binaryName)
 	if runtime.GOOS == "darwin" {
 		want = append(want, "UNSIGNED-CANDIDATE.txt")
 	}
@@ -403,10 +465,7 @@ func TestNativePackage(t *testing.T) {
 		if e.link {
 			t.Fatal("link in package")
 		}
-		expected := os.FileMode(0644)
-		if e.name == binaryName || e.name == "workbuddy/runtime/"+binaryName || e.name == "workbuddy/hooks/launch.sh" {
-			expected = 0755
-		}
+		expected := nativePackageMode(e.name, binaryName)
 		if e.mode.Perm() != expected {
 			t.Fatalf("wrong archive mode %s: %o", e.name, e.mode)
 		}
@@ -437,7 +496,7 @@ func TestNativePackage(t *testing.T) {
 				t.Fatal("unsigned marker missing")
 			}
 		case "skills/agent-task-notify/SKILL.md", "INSTALL.md", "INSTALL.zh-CN.md":
-			if !bytes.Contains(e.data, []byte("0.2.0-rc.1")) || !bytes.Contains(e.data, []byte("--data-directory")) || !bytes.Contains(e.data, []byte("--send")) {
+			if !bytes.Contains(e.data, []byte("0.2.0-rc.2")) || !bytes.Contains(e.data, []byte("--data-directory")) || !bytes.Contains(e.data, []byte("--send")) {
 				t.Fatal("packaged native guide missing", e.name)
 			}
 			for _, match := range regexp.MustCompile(`\[[^\]]*\]\(([^)]+)\)`).FindAllSubmatch(e.data, -1) {
@@ -457,7 +516,7 @@ func TestNativePackage(t *testing.T) {
 		t.Fatal(err)
 	}
 	binHash := sha256.Sum256(binaryData)
-	if manifest.SchemaVersion != 1 || manifest.Version != "0.2.0-rc.1" || manifest.Platform != platform || manifest.BinarySHA256 != hex.EncodeToString(binHash[:]) || !reflect.DeepEqual(manifest.Files, want) {
+	if manifest.SchemaVersion != 1 || manifest.Version != "0.2.0-rc.2" || manifest.Platform != platform || manifest.BinarySHA256 != hex.EncodeToString(binHash[:]) || !reflect.DeepEqual(manifest.Files, want) {
 		t.Fatal("manifest mismatch")
 	}
 	selected, err = nativeCISelectedPath(t, "Verify and run the downloaded canonical archive", "extract", runner, t.TempDir(), t.TempDir())
@@ -470,9 +529,9 @@ func TestNativePackage(t *testing.T) {
 		// normalization must not redirect this valid packaged location.
 		extract += `\literal`
 	}
-	verifyArgs := []string{"verify", "--archive", archive, "--checksums", sums, "--platform", platform, "--version", "0.2.0-rc.1", "--extract-to", extract}
+	verifyArgs := []string{"verify", "--archive", archive, "--checksums", sums, "--platform", platform, "--version", "0.2.0-rc.2", "--extract-to", extract}
 	output := packageRun(t, tool, true, verifyArgs...)
-	if !strings.Contains(output, "verified agent-task-notify 0.2.0-rc.1 "+platform) || !strings.Contains(output, "doctor and six dry previews passed") {
+	if !strings.Contains(output, "verified agent-task-notify 0.2.0-rc.2 "+platform) || !strings.Contains(output, "doctor and eight dry previews passed") {
 		t.Fatal("missing actual execution evidence")
 	}
 	for _, e := range entries {
@@ -481,7 +540,7 @@ func TestNativePackage(t *testing.T) {
 			t.Fatal("extraction content differs")
 		}
 	}
-	// Exact copied binary bytes plus six dry Agent lookups exercise embedded
+	// Exact copied binary bytes plus eight dry Agent lookups exercise embedded
 	// data. Separately require the actual archive binary to retain both embedded
 	// resources, with no mutable resource file in its fixed package inventory.
 	for _, resource := range []string{"config/defaults.json", "assets/agent-icons.json"} {
@@ -616,10 +675,8 @@ func TestNativePackage(t *testing.T) {
 			// Catch a missing/late stage, a failed check that continues, or
 			// input/native-error disclosure through real builder subprocesses.
 			prefix := "native package stage: arguments\nnative package stage: build-binary-read\nnative package stage: build-architecture\n"
-			sourcePair := "native package stage: build-source-read\nnative package stage: build-source-utf8\n"
-			// The fixed inventory has eleven source reads: the ninth parses
-			// the plugin descriptor and the eleventh checks launcher LF.
-			sourceSteps := strings.Repeat(sourcePair, 9) + "native package stage: build-plugin-json\n" + strings.Repeat(sourcePair, 2) + "native package stage: build-launcher-lf\n"
+			const sourcePair = "native package stage: build-source-read\nnative package stage: build-source-utf8\n"
+			sourceSteps := nativeBuildSourceSteps("")
 			for _, kind := range []string{"binary-read", "architecture", "source-read", "source-utf8", "plugin-json", "launcher-lf", "output-parent", "success"} {
 				t.Run(kind, func(t *testing.T) {
 					v := append([]string(nil), args...)
@@ -641,25 +698,20 @@ func TestNativePackage(t *testing.T) {
 						// Copy only these nonsecret source members into a new
 						// test-owned root; never mutate the real source tree.
 						v[2] = filepath.Join(t.TempDir(), "SENSITIVE source")
-						for _, relative := range []string{
-							"docs/native-installation.md", "docs/native-installation.zh-CN.md", "LICENSE", "THIRD_PARTY_NOTICES.md",
-							"integrations/opencode/agent-task-notify.mjs", "integrations/opencode/bridge.mjs",
-							"skills/agent-task-notify/SKILL.md", "skills/agent-task-notify/agents/openai.yaml",
-							"integrations/workbuddy/.workbuddy-plugin/plugin.json", "integrations/workbuddy/native/hooks.json", "integrations/workbuddy/native/launch.sh",
-						} {
-							data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(relative)))
+						for _, source := range nativePackageSources() {
+							data, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(source.source)))
 							if err != nil {
 								t.Fatal("diagnostic source read")
 							}
 							switch {
-							case kind == "source-utf8" && relative == "docs/native-installation.md":
+							case kind == "source-utf8" && source.name == "INSTALL.md":
 								data = []byte{0xff}
-							case kind == "plugin-json" && relative == "integrations/workbuddy/.workbuddy-plugin/plugin.json":
+							case kind == "plugin-json" && source.name == "workbuddy/.workbuddy-plugin/plugin.json":
 								data = []byte("SENSITIVE invalid plugin")
-							case kind == "launcher-lf" && relative == "integrations/workbuddy/native/launch.sh":
+							case kind == "launcher-lf" && source.launcherLF:
 								data = []byte("SENSITIVE invalid\rlauncher")
 							}
-							path := filepath.Join(v[2], filepath.FromSlash(relative))
+							path := filepath.Join(v[2], filepath.FromSlash(source.source))
 							if os.MkdirAll(filepath.Dir(path), 0700) != nil || os.WriteFile(path, data, 0600) != nil {
 								t.Fatal("diagnostic source fixture")
 							}
@@ -668,7 +720,7 @@ func TestNativePackage(t *testing.T) {
 						case "source-utf8":
 							want += sourcePair
 						case "plugin-json":
-							want += strings.Repeat(sourcePair, 9) + "native package stage: build-plugin-json\n"
+							want += nativeBuildSourceSteps("workbuddy/.workbuddy-plugin/plugin.json")
 						case "launcher-lf":
 							want += sourceSteps
 						}
@@ -685,7 +737,8 @@ func TestNativePackage(t *testing.T) {
 					if kind != "success" {
 						want += "native package rejected\n"
 					}
-					if stderr != want || strings.Count(stderr, "\n") > 40 {
+					maxLines := 2*len(nativePackageSources()) + 20
+					if stderr != want || strings.Count(stderr, "\n") > maxLines {
 						t.Fatalf("wrong build diagnostic boundary: %q", stderr)
 					}
 					if kind == "success" {
@@ -761,13 +814,14 @@ func TestNativePackage(t *testing.T) {
 					}
 					return
 				}
-				if stdout != "verified agent-task-notify 0.2.0-rc.1 "+platform+" — doctor and six dry previews passed\n" {
+				if stdout != "verified agent-task-notify 0.2.0-rc.2 "+platform+" — doctor and eight dry previews passed\n" {
 					t.Fatalf("diagnostic success output: %q", stdout)
 				}
 				allowed := strings.Fields("arguments target archive-read checksums-read checksum archive-decode content extract-root directory-parent directory-create extract-directory extract-write private-readback mode hostfile extract-recheck isolated-random isolated-root isolated-directory isolated-version isolated-version-output isolated-doctor isolated-doctor-output isolated-preview isolated-preview-output isolated-state final-recheck complete")
 				seen := map[string]int{}
 				lines := strings.Split(strings.TrimSuffix(stderr, "\n"), "\n")
-				if len(lines) > 160 || !strings.HasPrefix(stderr, prefix) || !strings.HasSuffix(stderr, "native package stage: complete\n") {
+				maxLines := 8*len(nativePackageNames(binaryName)) + 80
+				if len(lines) > maxLines || !strings.HasPrefix(stderr, prefix) || !strings.HasSuffix(stderr, "native package stage: complete\n") {
 					t.Fatalf("missing or unbounded stage sequence: %q", stderr)
 				}
 				for _, line := range lines {
@@ -782,8 +836,8 @@ func TestNativePackage(t *testing.T) {
 						t.Fatalf("missing successful boundary %s", label)
 					}
 				}
-				if seen["isolated-preview"] != 6 || seen["isolated-preview-output"] != 6 {
-					t.Fatal("six preview boundaries missing")
+				if seen["isolated-preview"] != 8 || seen["isolated-preview-output"] != 8 {
+					t.Fatal("eight preview boundaries missing")
 				}
 			})
 		}
@@ -809,7 +863,7 @@ func TestNativePackage(t *testing.T) {
 		packageRun(t, tool, false, v...)
 		assertPackageAbsent(t, v[len(v)-1])
 	})
-	for _, c := range []struct{ name, flag, value string }{{"version", "--version", "0.2.0-rc.1/other"}, {"platform", "--platform", "linux-amd64"}, {"wrong-arch", "--platform", map[string]string{"windows": "darwin-amd64", "darwin": "windows-amd64"}[runtime.GOOS]}} {
+	for _, c := range []struct{ name, flag, value string }{{"version", "--version", "0.2.0-rc.2/other"}, {"platform", "--platform", "linux-amd64"}, {"wrong-arch", "--platform", map[string]string{"windows": "darwin-amd64", "darwin": "windows-amd64"}[runtime.GOOS]}} {
 		t.Run(c.name, func(t *testing.T) {
 			bad := append([]string(nil), args...)
 			for i := range bad {
@@ -897,7 +951,7 @@ func TestNativePackage(t *testing.T) {
 			}
 			changedHash := sha256.Sum256(modified)
 			for i := range e {
-				if e[i].name == binaryName || e[i].name == "workbuddy/runtime/"+binaryName {
+				if e[i].name == binaryName || strings.HasSuffix(e[i].name, "/runtime/"+binaryName) {
 					e[i].data = modified
 				}
 				if e[i].name == "manifest.json" {
@@ -938,6 +992,22 @@ func TestNativePackage(t *testing.T) {
 			}
 			return e
 		}},
+		{"openclaw-binary", func(e []packageEntry) []packageEntry {
+			for i := range e {
+				if e[i].name == "openclaw/runtime/"+binaryName {
+					e[i].data = []byte("not same binary")
+				}
+			}
+			return e
+		}},
+		{"hermes-binary", func(e []packageEntry) []packageEntry {
+			for i := range e {
+				if e[i].name == "hermes/runtime/"+binaryName {
+					e[i].data = []byte("not same binary")
+				}
+			}
+			return e
+		}},
 	}
 	for _, c := range mutations {
 		t.Run(c.name, func(t *testing.T) {
@@ -951,7 +1021,7 @@ func TestNativePackage(t *testing.T) {
 				t.Fatal("fixture")
 			}
 			dest := filepath.Join(dir, "extract")
-			packageRun(t, tool, false, "verify", "--archive", path, "--checksums", sumPath, "--platform", platform, "--version", "0.2.0-rc.1", "--extract-to", dest)
+			packageRun(t, tool, false, "verify", "--archive", path, "--checksums", sumPath, "--platform", platform, "--version", "0.2.0-rc.2", "--extract-to", dest)
 			assertPackageAbsent(t, dest)
 		})
 	}

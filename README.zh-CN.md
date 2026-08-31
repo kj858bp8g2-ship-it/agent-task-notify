@@ -1,6 +1,6 @@
 # Agent Task Notify
 
-为 Codex、Claude Code、Cursor、Gemini CLI、OpenCode 以及实验性的 WorkBuddy 本地长任务提供手机通知。原生 `0.2.0-rc.1` 面向 Windows x64 与实验性 Mac Intel/Apple Silicon；支持 Bark/iOS 及实验性 ntfy/Android。本项目不隶属于任何 Agent 或通知服务商。
+为 Codex、Claude Code、Cursor、Gemini CLI、OpenCode，以及实验性的 WorkBuddy、OpenClaw、Hermes Agent 本地长任务提供手机通知。原生 `0.2.0-rc.2` 面向 Windows x64 与实验性 Mac Intel/Apple Silicon；支持 Bark/iOS 及实验性 ntfy/Android。本项目不隶属于任何 Agent 或通知服务商。
 
 ## 原生候选快速开始
 
@@ -9,7 +9,7 @@
 1. 从同仓库获取已审查的精确候选包，核对来源与 SHA256SUMS，解压到新的自有目录，不覆盖现用安装。
 2. 让具备本机操作能力的 Agent 使用包内 Skill，或自行按 INSTALL 操作：确认平台、独立自有数据目录、宿主 shell、修改目标和信任流程。给出仓库链接/导入 Skill 不会自动安装或启动常驻服务。
 3. 运行原生程序的 `version`、`doctor --data-directory ABS_DATA` 和干预前 `preview --agent codex --data-directory ABS_DATA`；这些不验证凭据或证明宿主已加载。
-4. 用 `configure --provider bark --data-directory ABS_DATA`（或 `ntfy`）配置，只在本地隐藏提示输入凭据。先预览安装，再经授权加 `--apply`；WorkBuddy 手动导入完整实验包。
+4. 用 `configure --provider bark --data-directory ABS_DATA`（或 `ntfy`）配置，只在本地隐藏提示输入凭据。先预览安装，再经授权加 `--apply`；WorkBuddy、OpenClaw、Hermes 使用包内各自的手动实验适配。
 5. 仅明确需要真实响铃测试时使用 `preview --agent codex --send --data-directory ABS_DATA`。排队/服务接受不等于手机送达；启用的 Hook 达到阈值后也会自动发送。
 
 默认 1800 秒起提醒、3600 秒长任务档位，Bark 目标 45/60 秒、铃声 `alarm`，均可调。连续 Bark 可能显示两条通知，时间为近似；ntfy 声音由手机控制，不是真电话。不保证每个 `needs_attention` 时刻，无额外遥测、现用旧版自动迁移、离线/重启恢复或恰好一次保证。不要在聊天中分享密钥、token 或私有端点，不要同时启用原生和旧版路线。

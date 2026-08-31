@@ -1,6 +1,6 @@
 # WorkBuddy experimental wrapper
 
-## Native 0.2.0-rc.1 candidate
+## Native 0.2.0-rc.2 candidate
 
 Use the **complete `workbuddy` subfolder from the matching native archive**, not this source wrapper or `Build-Plugin.ps1`. The package has `.workbuddy-plugin/plugin.json`, `hooks/hooks.json`, `hooks/launch.sh` and its matching `runtime/agent-task-notify` (Windows `.exe`). No separate notifier PowerShell/Node/Python/Go dependency exists; the host still supplies Bash and its verified plugin workflow. Mac is unsigned, not notarized and experimental: ordinary auto-install must stop; never bypass OS protections.
 

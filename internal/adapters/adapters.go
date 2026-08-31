@@ -20,7 +20,11 @@ func Normalize(agentID string, data []byte) (event core.Event, accepted bool, er
 	if err != nil {
 		return core.Event{}, false, err
 	}
-	if childEvent(agentID, object) {
+	child, err := childEvent(agentID, object)
+	if err != nil {
+		return core.Event{}, false, err
+	}
+	if child {
 		return core.Event{}, false, nil
 	}
 	hook, _ := requiredString(object, "hook_event_name")
@@ -80,7 +84,7 @@ func Normalize(agentID string, data []byte) (event core.Event, accepted bool, er
 		case "AfterAgent":
 			return core.Event{AgentID: agentID, SessionID: session, EventType: "stopped", Reason: "stopped"}, true, nil
 		}
-	case "opencode":
+	case "opencode", "openclaw":
 		version, versionOK := requiredInteger(object, "schemaVersion")
 		eventName, eventOK := requiredString(object, "event")
 		session, sessionOK := requiredString(object, "sessionId")
@@ -107,6 +111,39 @@ func Normalize(agentID string, data []byte) (event core.Event, accepted bool, er
 		case "Stop":
 			return core.Event{AgentID: agentID, SessionID: session, EventType: "stopped", Reason: "stopped"}, true, nil
 		}
+	case "hermes":
+		session, ok := requiredString(object, "session_id")
+		if !ok {
+			return core.Event{}, false, nil
+		}
+		extra, err := requiredObject(object, "extra")
+		if err != nil {
+			return core.Event{}, false, err
+		}
+		run, _ := requiredString(extra, "turn_id")
+		switch hook {
+		case "pre_llm_call":
+			return core.Event{AgentID: agentID, SessionID: session, NativeRunID: run, EventType: "started"}, true, nil
+		case "on_session_end":
+			completed, completedPresent, err := optionalBoolean(extra, "completed")
+			if err != nil {
+				return core.Event{}, false, err
+			}
+			failed, failedPresent, err := optionalBoolean(extra, "failed")
+			if err != nil {
+				return core.Event{}, false, err
+			}
+			interrupted, interruptedPresent, err := optionalBoolean(extra, "interrupted")
+			if err != nil {
+				return core.Event{}, false, err
+			}
+			if (failedPresent && failed) || (interruptedPresent && interrupted) {
+				return core.Event{AgentID: agentID, SessionID: session, NativeRunID: run, EventType: "failed", Reason: "failed"}, true, nil
+			}
+			if completedPresent && completed && (!failedPresent || !failed) && (!interruptedPresent || !interrupted) {
+				return core.Event{AgentID: agentID, SessionID: session, NativeRunID: run, EventType: "stopped", Reason: "completed"}, true, nil
+			}
+		}
 	}
 	return core.Event{}, false, nil
 }
@@ -131,25 +168,50 @@ func knownAgent(agentID string) bool {
 	return err == nil
 }
 
-func childEvent(agentID string, object map[string]json.RawMessage) bool {
+func childEvent(agentID string, object map[string]json.RawMessage) (bool, error) {
 	if _, present := object["parent_session_id"]; present {
-		return true
+		return true, nil
 	}
 	if _, present := object["parentSessionId"]; present {
-		return true
+		return true, nil
 	}
 	if hook, ok := requiredString(object, "hook_event_name"); ok && hook == "SubagentStop" {
-		return true
+		return true, nil
 	}
 	if agentID == "claude-code" {
 		_, child := requiredString(object, "agent_id")
-		return child
+		return child, nil
 	}
 	if agentID == "opencode" {
 		_, child := requiredString(object, "parentId")
-		return child
+		return child, nil
 	}
-	return false
+	if agentID == "hermes" {
+		extra, err := requiredObject(object, "extra")
+		if err != nil {
+			return false, err
+		}
+		_, child := requiredString(extra, "parent_session_id")
+		return child, nil
+	}
+	return false, nil
+}
+
+func requiredObject(object map[string]json.RawMessage, key string) (map[string]json.RawMessage, error) {
+	raw, present := object[key]
+	if !present {
+		return nil, errors.New("missing object")
+	}
+	return strictjson.Object(raw)
+}
+
+func optionalBoolean(object map[string]json.RawMessage, key string) (bool, bool, error) {
+	raw, present := object[key]
+	if !present {
+		return false, false, nil
+	}
+	value, err := strictjson.Boolean(raw)
+	return value, true, err
 }
 
 func requiredString(object map[string]json.RawMessage, key string) (string, bool) {

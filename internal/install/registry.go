@@ -27,9 +27,17 @@ func automaticAgent(agent string) bool {
 	return false
 }
 
+func manualAgent(agent string) bool {
+	switch agent {
+	case "workbuddy", "openclaw", "hermes":
+		return true
+	}
+	return false
+}
+
 func resolveTarget(agent, explicit string) (config, target string, err error) {
 	if !automaticAgent(agent) {
-		if agent == "workbuddy" {
+		if manualAgent(agent) {
 			return "", "", ErrManualPackageRequired
 		}
 		return "", "", ErrInvalid

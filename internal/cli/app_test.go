@@ -19,7 +19,7 @@ func TestVersionAndUnknownArguments(t *testing.T) {
 			name:     "version",
 			args:     []string{"version"},
 			wantCode: 0,
-			wantOut:  "agent-task-notify 0.2.0-rc.1 " + runtime.GOOS + "/" + runtime.GOARCH + "\n",
+			wantOut:  "agent-task-notify 0.2.0-rc.2 " + runtime.GOOS + "/" + runtime.GOARCH + "\n",
 			wantErr:  "",
 		},
 		{

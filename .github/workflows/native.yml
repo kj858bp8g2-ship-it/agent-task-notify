@@ -54,8 +54,8 @@ jobs:
         run: go test -count=1 ./...
       - name: Vet native source
         run: go vet ./...
-      - name: Check native and legacy OpenCode bridge
-        run: node --test tests/opencode-bridge.test.mjs
+      - name: Check native JavaScript bridges
+        run: node --test tests/opencode-bridge.test.mjs tests/openclaw-bridge.test.mjs
       - name: Build canonical unsigned candidate archive
         if: matrix.canonical
         id: candidate
@@ -70,7 +70,7 @@ jobs:
           $binary = Join-Path $env:RUNNER_TEMP "agent-task-notify$suffix"
           go build -trimpath -o $binary ./cmd/agent-task-notify
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          go run ./cmd/package-native build --source-root $env:GITHUB_WORKSPACE --binary $binary --platform '${{ matrix.platform }}' --version 0.2.0-rc.1 --output $candidate
+          go run ./cmd/package-native build --source-root $env:GITHUB_WORKSPACE --binary $binary --platform '${{ matrix.platform }}' --version 0.2.0-rc.2 --output $candidate
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Content -LiteralPath (Join-Path $candidate 'SHA256SUMS')
           "path=$candidate" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
@@ -122,11 +122,11 @@ jobs:
         run: |
           $download = Join-Path $env:RUNNER_TEMP 'atn-canonical-download'
           $extension = if ($env:RUNNER_OS -eq 'Windows') { '.zip' } else { '.tar.gz' }
-          $archive = Join-Path $download "atn-native-0.2.0-rc.1-${{ matrix.platform }}$extension"
+          $archive = Join-Path $download "atn-native-0.2.0-rc.2-${{ matrix.platform }}$extension"
           $parent = if ($env:RUNNER_OS -eq 'Windows') { $env:TEMP } else { $env:RUNNER_TEMP }
           if ([string]::IsNullOrWhiteSpace($parent) -or -not [IO.Path]::IsPathFullyQualified($parent) -or -not (Test-Path -LiteralPath $parent -PathType Container)) { throw 'existing absolute package parent required' }
           $extract = Join-Path $parent '原生 package verified'
           Write-Output "source=$env:GITHUB_SHA os=$env:RUNNER_OS arch=$env:RUNNER_ARCH canonical=${{ matrix.platform }}"
-          go run ./cmd/package-native verify --archive $archive --checksums (Join-Path $download 'SHA256SUMS') --platform '${{ matrix.platform }}' --version 0.2.0-rc.1 --extract-to $extract
+          go run ./cmd/package-native verify --archive $archive --checksums (Join-Path $download 'SHA256SUMS') --platform '${{ matrix.platform }}' --version 0.2.0-rc.2 --extract-to $extract
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           Get-Content -LiteralPath (Join-Path $download 'SHA256SUMS')

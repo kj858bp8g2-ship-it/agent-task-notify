@@ -2,7 +2,7 @@ name: Native candidate prerelease
 
 on:
   push:
-    tags: ['v0.2.0-rc.1']
+    tags: ['v0.2.0-rc.2']
   workflow_dispatch:
 
 permissions:
@@ -10,14 +10,14 @@ permissions:
 
 jobs:
   native:
-    if: github.ref == 'refs/tags/v0.2.0-rc.1'
+    if: github.ref == 'refs/tags/v0.2.0-rc.2'
     uses: ./.github/workflows/native.yml
   legacy:
-    if: github.ref == 'refs/tags/v0.2.0-rc.1'
+    if: github.ref == 'refs/tags/v0.2.0-rc.2'
     uses: ./.github/workflows/test.yml
   publish:
     needs: [native, legacy]
-    if: github.ref == 'refs/tags/v0.2.0-rc.1' && success()
+    if: github.ref == 'refs/tags/v0.2.0-rc.2' && success()
     permissions:
       contents: write
     runs-on: ubuntu-latest
@@ -62,9 +62,9 @@ jobs:
               return result
 
           try:
-              require(os.environ.get("GITHUB_REF") == "refs/tags/v0.2.0-rc.1")
+              require(os.environ.get("GITHUB_REF") == "refs/tags/v0.2.0-rc.2")
               require(os.environ.get("GITHUB_REPOSITORY") == "kj858bp8g2-ship-it/agent-task-notify")
-              version = "0.2.0-rc.1"
+              version = "0.2.0-rc.2"
               source = read_file(pathlib.Path("internal/cli/app.go"), 65536).decode("utf-8")
               require(len(re.findall(r"(?m)^\s*const\s+Version\b", source)) == 1)
               require(re.findall(r'^const Version = "([^"\r\n]+)"$', source, re.M) == [version])
@@ -79,10 +79,10 @@ jobs:
                   folder = root / platform
                   require(stat.S_ISDIR(folder.lstat().st_mode))
                   require(sorted(p.name for p in folder.iterdir()) == sorted((name, "SHA256SUMS")))
-                  data = read_file(folder / name, 220 * 1024 * 1024)
+                  data = read_file(folder / name, 420 * 1024 * 1024)
                   checksum = hashlib.sha256(data).hexdigest() + "  " + name + "\n"
                   require(read_file(folder / "SHA256SUMS", 1024).decode("ascii") == checksum)
-                  expected = sorted((binary, "LICENSE", "THIRD_PARTY_NOTICES.md", "manifest.json", "INSTALL.md", "INSTALL.zh-CN.md", "skills/agent-task-notify/SKILL.md", "skills/agent-task-notify/agents/openai.yaml", "integrations/opencode/agent-task-notify.mjs", "integrations/opencode/bridge.mjs", "workbuddy/.workbuddy-plugin/plugin.json", "workbuddy/hooks/hooks.json", "workbuddy/hooks/launch.sh", "workbuddy/runtime/" + binary) + (() if is_windows else ("UNSIGNED-CANDIDATE.txt",)))
+                  expected = sorted((binary, "LICENSE", "THIRD_PARTY_NOTICES.md", "manifest.json", "INSTALL.md", "INSTALL.zh-CN.md", "skills/agent-task-notify/SKILL.md", "skills/agent-task-notify/agents/openai.yaml", "integrations/opencode/agent-task-notify.mjs", "integrations/opencode/bridge.mjs", "workbuddy/.workbuddy-plugin/plugin.json", "workbuddy/hooks/hooks.json", "workbuddy/hooks/launch.sh", "workbuddy/runtime/" + binary, "openclaw/README.md", "openclaw/package.json", "openclaw/openclaw.plugin.json", "openclaw/index.js", "openclaw/bridge.mjs", "openclaw/runtime/" + binary, "hermes/README.md", "hermes/config.example.yaml", "hermes/runtime/" + binary) + (() if is_windows else ("UNSIGNED-CANDIDATE.txt",)))
                   members = {}
                   total = 0
                   if is_windows:
@@ -91,8 +91,8 @@ jobs:
                       # Bound decompression before tarfile parses extended
                       # headers, not only after a regular member is returned.
                       with gzip.GzipFile(fileobj=io.BytesIO(data)) as compressed:
-                          expanded = compressed.read(221 * 1024 * 1024 + 1)
-                      require(len(expanded) <= 221 * 1024 * 1024)
+                          expanded = compressed.read(421 * 1024 * 1024 + 1)
+                      require(len(expanded) <= 421 * 1024 * 1024)
                       archive = tarfile.open(fileobj=io.BytesIO(expanded), mode="r:")
                   with archive:
                       for member in archive.infolist() if is_windows else archive:
@@ -100,13 +100,13 @@ jobs:
                           require(member_name in expected and member_name not in members and len(members) < len(expected))
                           mode = member.external_attr >> 16 if is_windows else member.mode
                           require(stat.S_ISREG(mode) if is_windows else member.isfile())
-                          executable = member_name in (binary, "workbuddy/runtime/" + binary, "workbuddy/hooks/launch.sh")
+                          executable = member_name in (binary, "workbuddy/runtime/" + binary, "openclaw/runtime/" + binary, "hermes/runtime/" + binary, "workbuddy/hooks/launch.sh")
                           require(stat.S_IMODE(mode) == (0o755 if executable else 0o644))
                           size = member.file_size if is_windows else member.size
-                          limit = (100 if member_name in (binary, "workbuddy/runtime/" + binary) else 1) * 1024 * 1024
+                          limit = (100 if member_name in (binary, "workbuddy/runtime/" + binary, "openclaw/runtime/" + binary, "hermes/runtime/" + binary) else 1) * 1024 * 1024
                           require(0 <= size <= limit)
                           total += size
-                          require(total <= 220 * 1024 * 1024)
+                          require(total <= 420 * 1024 * 1024)
                           with archive.open(member) if is_windows else archive.extractfile(member) as stream:
                               content = stream.read(limit + 1)
                           require(len(content) == size)
@@ -117,7 +117,7 @@ jobs:
                   require(type(manifest["schemaVersion"]) is int and manifest["schemaVersion"] == 1)
                   require(manifest["version"] == version and manifest["platform"] == platform and manifest["files"] == expected)
                   require(manifest["binarySHA256"] == hashlib.sha256(members[binary]).hexdigest())
-                  require(members[binary] == members["workbuddy/runtime/" + binary])
+                  require(members[binary] == members["workbuddy/runtime/" + binary] == members["openclaw/runtime/" + binary] == members["hermes/runtime/" + binary])
                   checksums.append(checksum)
               # No extraction or foreign executable launch. Matching-OS package
               # execution is required by the entire reusable native gate above.
@@ -134,7 +134,7 @@ jobs:
           import json, os, re, subprocess, sys
 
           repo = "kj858bp8g2-ship-it/agent-task-notify"
-          tag = "v0.2.0-rc.1"
+          tag = "v0.2.0-rc.2"
           def refuse():
               sys.exit("publication refused; inspect the run and existing release before retrying")
 
@@ -162,13 +162,13 @@ jobs:
           except (ValueError, AttributeError):
               refuse()
           base = "https://github.com/" + repo + "/blob/" + tag + "/docs/"
-          notes = ("Native 0.2.0-rc.1 prerelease. Windows x64; Mac Intel/Apple Silicon are unsigned, not notarized experimental candidates, not ordinary auto-install. "
-                   "Real desktop hosts, first Keychain authorization, Gatekeeper first launch and iOS/Android phones are untested for this candidate. "
+          notes = ("Native 0.2.0-rc.2 prerelease with experimental manual OpenClaw and Hermes Agent packages. Windows x64; Mac Intel/Apple Silicon are unsigned, not notarized experimental candidates, not ordinary auto-install. "
+                   "Real OpenClaw/Hermes/WorkBuddy hosts, first Keychain authorization, Gatekeeper first launch and new iOS/Android phone delivery are untested for this candidate. "
                    "Installation: " + base + "native-installation.md\nCompatibility: " + base + "native-compatibility.md\nValidation: " + base + "native-validation.md")
-          result = gh("release", "create", tag, "--repo", repo, "--verify-tag", "--prerelease", "--title", "Native 0.2.0-rc.1 candidate", "--notes", notes,
-                      "candidate/windows-amd64/atn-native-0.2.0-rc.1-windows-amd64.zip",
-                      "candidate/darwin-amd64/atn-native-0.2.0-rc.1-darwin-amd64.tar.gz",
-                      "candidate/darwin-arm64/atn-native-0.2.0-rc.1-darwin-arm64.tar.gz", "SHA256SUMS")
+          result = gh("release", "create", tag, "--repo", repo, "--verify-tag", "--prerelease", "--title", "Native 0.2.0-rc.2 candidate", "--notes", notes,
+                      "candidate/windows-amd64/atn-native-0.2.0-rc.2-windows-amd64.zip",
+                      "candidate/darwin-amd64/atn-native-0.2.0-rc.2-darwin-amd64.tar.gz",
+                      "candidate/darwin-arm64/atn-native-0.2.0-rc.2-darwin-arm64.tar.gz", "SHA256SUMS")
           if result.returncode != 0:
               refuse()
           print("Prerelease creation accepted; verify the actual release and four assets before handoff")

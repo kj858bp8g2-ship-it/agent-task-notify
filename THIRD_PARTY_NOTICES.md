@@ -10,6 +10,8 @@ The source code in this repository is MIT licensed. Product names and remote ico
 | Gemini CLI | https://apps.apple.com/us/app/google-gemini/id6477489729 | JPEG, 512×512, SHA-256 `98b0dc85fa41a37fcd58945d3374b2a290fd1e9839fe244b7e70c75e6f57180a` | Remote provider decoration only; configurable or omitted. |
 | OpenCode | https://github.com/anomalyco/opencode/blob/b4147c8d08b2e14554337536f54c6965006b29ca/packages/desktop/icons/prod/ios/AppIcon-512@2x.png | PNG, 1024×1024, SHA-256 `cc7f380d7e0ef9fe76d99babdf91230b308b3740ff7f771c657248572c164860` | Pinned official commit; remote decoration only. |
 | WorkBuddy | https://apps.apple.com/cn/app/id6761374913 | JPEG, 512×512, SHA-256 `776ab0ad30813d496b03e7ead4cebdb932c75549f07b5826b8b361b3c9ed783a` | Remote provider decoration only; configurable or omitted. |
+| OpenClaw | https://github.com/openclaw/openclaw/blob/55fc26e11e378fa8c0c10049d72c9bb55d50328b/apps/linux/src-tauri/icons/icon.png | PNG, 512×512, SHA-256 `64edcecadc81184cf001506be6280c3763349cf80bd6b8929c45d21d7b29182e` | Pinned official commit; remote decoration only. |
+| Hermes Agent | https://github.com/NousResearch/hermes-agent/blob/a0a63a1bc21115ba8da7fed6fdb695522dd37c96/apps/desktop/assets/icon.png | PNG, 1024×1024, SHA-256 `d60d164e24fdcf6532133b8ea43c77a201e4b9e9dbc396187b58d51d8590ef52` | Pinned official commit; remote decoration only. |
 
 All icons can be overridden with a user-controlled HTTPS URL, disabled with an empty override, or omitted when artwork cannot load. The fallback is text/default application artwork, never another Agent logo.
 

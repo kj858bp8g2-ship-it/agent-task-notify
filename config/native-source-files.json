@@ -94,5 +94,13 @@
   "integrations/workbuddy/native/hooks.json",
   "integrations/workbuddy/native/launch.sh",
   "integrations/workbuddy/native/.gitattributes",
+  "integrations/openclaw/package.json",
+  "integrations/openclaw/openclaw.plugin.json",
+  "integrations/openclaw/index.js",
+  "integrations/openclaw/bridge.mjs",
+  "integrations/openclaw/README.md",
+  "integrations/hermes/config.example.yaml",
+  "integrations/hermes/README.md",
+  "tests/openclaw-bridge.test.mjs",
   "docs/superpowers/plans/2026-08-28-native-migration.md"
 ]

@@ -1,0 +1,10 @@
+# Merge these two entries into ~/.hermes/config.yaml. Do not replace unrelated hooks.
+# Replace both placeholders with reviewed absolute paths.
+# On native Windows, use forward slashes in the command path, for example C:/path/to/...
+hooks:
+  pre_llm_call:
+    - command: '"__ATN_EXECUTABLE__" hook --agent hermes --data-directory "__ATN_DATA_DIRECTORY__"'
+      timeout: 10
+  on_session_end:
+    - command: '"__ATN_EXECUTABLE__" hook --agent hermes --data-directory "__ATN_DATA_DIRECTORY__"'
+      timeout: 10

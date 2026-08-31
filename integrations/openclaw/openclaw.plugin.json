@@ -1,0 +1,26 @@
+{
+  "id": "agent-task-notify",
+  "name": "Agent Task Notify",
+  "description": "Send privacy-minimized long-task lifecycle events to agent-task-notify.",
+  "activation": {
+    "onStartup": true
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "executable": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "Optional absolute path to agent-task-notify. The packaged runtime is used by default."
+      },
+      "dataDirectory": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4096,
+        "description": "Optional absolute agent-task-notify data directory."
+      }
+    }
+  }
+}

@@ -33,11 +33,11 @@ import (
 	"github.com/kj858bp8g2-ship-it/agent-task-notify/internal/strictjson"
 )
 
-const candidateVersion = "0.2.0-rc.1"
+const candidateVersion = "0.2.0-rc.2"
 const binaryLimit = 100 * 1024 * 1024
 const textLimit = 1024 * 1024
-const archiveLimit = 220 * 1024 * 1024
-const expandedArchiveLimit = 221 * 1024 * 1024
+const archiveLimit = 420 * 1024 * 1024
+const expandedArchiveLimit = 421 * 1024 * 1024
 const unsignedNotice = "UNSIGNED CANDIDATE — experimental CI test artifact only.\nNot signed or notarized for end-user distribution. Stop if macOS blocks execution; do not bypass Gatekeeper or remove quarantine.\nRead packaged INSTALL.md or INSTALL.zh-CN.md for the explicit experimental setup and evidence boundaries.\n"
 
 var errPackage = errors.New("native package rejected")
@@ -132,7 +132,14 @@ func digest(data []byte) string { sum := sha256.Sum256(data); return hex.EncodeT
 
 func inventory(platform string) []entry {
 	binary := binaryName(platform)
-	list := []entry{{binary, nil, 0755}, {"LICENSE", nil, 0644}, {"THIRD_PARTY_NOTICES.md", nil, 0644}, {"manifest.json", nil, 0644}, {"INSTALL.md", nil, 0644}, {"INSTALL.zh-CN.md", nil, 0644}, {"skills/agent-task-notify/SKILL.md", nil, 0644}, {"skills/agent-task-notify/agents/openai.yaml", nil, 0644}, {"integrations/opencode/agent-task-notify.mjs", nil, 0644}, {"integrations/opencode/bridge.mjs", nil, 0644}, {"workbuddy/.workbuddy-plugin/plugin.json", nil, 0644}, {"workbuddy/hooks/hooks.json", nil, 0644}, {"workbuddy/hooks/launch.sh", nil, 0755}, {"workbuddy/runtime/" + binary, nil, 0755}}
+	list := []entry{
+		{binary, nil, 0755}, {"LICENSE", nil, 0644}, {"THIRD_PARTY_NOTICES.md", nil, 0644}, {"manifest.json", nil, 0644},
+		{"INSTALL.md", nil, 0644}, {"INSTALL.zh-CN.md", nil, 0644}, {"skills/agent-task-notify/SKILL.md", nil, 0644}, {"skills/agent-task-notify/agents/openai.yaml", nil, 0644},
+		{"integrations/opencode/agent-task-notify.mjs", nil, 0644}, {"integrations/opencode/bridge.mjs", nil, 0644},
+		{"workbuddy/.workbuddy-plugin/plugin.json", nil, 0644}, {"workbuddy/hooks/hooks.json", nil, 0644}, {"workbuddy/hooks/launch.sh", nil, 0755}, {"workbuddy/runtime/" + binary, nil, 0755},
+		{"openclaw/README.md", nil, 0644}, {"openclaw/package.json", nil, 0644}, {"openclaw/openclaw.plugin.json", nil, 0644}, {"openclaw/index.js", nil, 0644}, {"openclaw/bridge.mjs", nil, 0644}, {"openclaw/runtime/" + binary, nil, 0755},
+		{"hermes/README.md", nil, 0644}, {"hermes/config.example.yaml", nil, 0644}, {"hermes/runtime/" + binary, nil, 0755},
+	}
 	if strings.HasPrefix(platform, "darwin-") {
 		list = append(list, entry{"UNSIGNED-CANDIDATE.txt", nil, 0644})
 	}
@@ -147,10 +154,23 @@ func names(entries []entry) []string {
 	return result
 }
 func memberLimit(name, platform string) int64 {
-	if name == binaryName(platform) || name == "workbuddy/runtime/"+binaryName(platform) {
+	if packagedBinary(name, platform) {
 		return binaryLimit
 	}
 	return textLimit
+}
+
+func packagedBinary(name, platform string) bool {
+	binary := binaryName(platform)
+	if name == binary {
+		return true
+	}
+	for _, prefix := range []string{"workbuddy/runtime/", "openclaw/runtime/", "hermes/runtime/"} {
+		if name == prefix+binary {
+			return true
+		}
+	}
+	return false
 }
 
 // Source/archives are nonsecret inputs: do not impose private state permissions
@@ -232,7 +252,7 @@ func buildPackage(v map[string]string, diagnostics packageDiagnostics) error {
 		e := &entries[i]
 		source := e.name
 		switch e.name {
-		case binaryName(platform), "workbuddy/runtime/" + binaryName(platform):
+		case binaryName(platform), "workbuddy/runtime/" + binaryName(platform), "openclaw/runtime/" + binaryName(platform), "hermes/runtime/" + binaryName(platform):
 			e.data = binary
 			continue
 		case "manifest.json":
@@ -250,6 +270,20 @@ func buildPackage(v map[string]string, diagnostics packageDiagnostics) error {
 			source = "integrations/workbuddy/native/launch.sh"
 		case "workbuddy/.workbuddy-plugin/plugin.json":
 			source = "integrations/workbuddy/.workbuddy-plugin/plugin.json"
+		case "openclaw/README.md":
+			source = "integrations/openclaw/README.md"
+		case "openclaw/package.json":
+			source = "integrations/openclaw/package.json"
+		case "openclaw/openclaw.plugin.json":
+			source = "integrations/openclaw/openclaw.plugin.json"
+		case "openclaw/index.js":
+			source = "integrations/openclaw/index.js"
+		case "openclaw/bridge.mjs":
+			source = "integrations/openclaw/bridge.mjs"
+		case "hermes/README.md":
+			source = "integrations/hermes/README.md"
+		case "hermes/config.example.yaml":
+			source = "integrations/hermes/config.example.yaml"
 		}
 		diagnostics.stage("build-source-read")
 		e.data, err = readRegular(filepath.Join(v["--source-root"], filepath.FromSlash(source)), textLimit)
@@ -260,7 +294,7 @@ func buildPackage(v map[string]string, diagnostics packageDiagnostics) error {
 		if !utf8.Valid(e.data) {
 			return errPackage
 		}
-		if e.name == "workbuddy/.workbuddy-plugin/plugin.json" {
+		if e.name == "workbuddy/.workbuddy-plugin/plugin.json" || e.name == "openclaw/package.json" {
 			diagnostics.stage("build-plugin-json")
 			object, err := strictjson.Object(e.data)
 			if err != nil {
@@ -476,8 +510,18 @@ func verifyContents(entries []entry, platform string) error {
 		return errPackage
 	}
 	binary := values[binaryName(platform)]
-	if m.BinarySHA256 != digest(binary) || !bytes.Equal(binary, values["workbuddy/runtime/"+binaryName(platform)]) || checkArchitecture(binary, platform) != nil {
+	if m.BinarySHA256 != digest(binary) || checkArchitecture(binary, platform) != nil {
 		return errPackage
+	}
+	for _, prefix := range []string{"workbuddy/runtime/", "openclaw/runtime/", "hermes/runtime/"} {
+		if !bytes.Equal(binary, values[prefix+binaryName(platform)]) {
+			return errPackage
+		}
+	}
+	for _, name := range []string{"openclaw/package.json", "openclaw/openclaw.plugin.json"} {
+		if _, err := strictjson.Object(values[name]); err != nil {
+			return errPackage
+		}
 	}
 	if strings.HasPrefix(platform, "darwin-") && !bytes.Equal(values["UNSIGNED-CANDIDATE.txt"], []byte(unsignedNotice)) {
 		return errPackage
@@ -594,7 +638,7 @@ func verifyPackage(v map[string]string, diagnostics packageDiagnostics) error {
 		return errPackage
 	}
 	diagnostics.stage("complete")
-	fmt.Println("verified agent-task-notify", candidateVersion, platform, "— doctor and six dry previews passed")
+	fmt.Println("verified agent-task-notify", candidateVersion, platform, "— doctor and eight dry previews passed")
 	return nil
 }
 
@@ -691,7 +735,7 @@ func runIsolated(root, platform string, entries []entry, diagnostics packageDiag
 	if json.Unmarshal(doctor, &d) != nil || d.SchemaVersion != 1 || d.Configured || d.InputErrors != 0 {
 		return errPackage
 	}
-	for _, agent := range []string{"codex", "claude-code", "cursor", "gemini-cli", "opencode", "workbuddy"} {
+	for _, agent := range []string{"codex", "claude-code", "cursor", "gemini-cli", "opencode", "workbuddy", "openclaw", "hermes"} {
 		diagnostics.stage("isolated-preview")
 		out, err := run("preview", "--agent", agent, "--data-directory", filepath.Join(runRoot, "data"))
 		if err != nil {

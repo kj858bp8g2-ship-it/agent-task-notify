@@ -258,7 +258,7 @@ func PlanUninstall(ctx context.Context, repository *configuration.Repository, ag
 	if ctx == nil || ctx.Err() != nil || repository == nil {
 		return p, ErrInvalid
 	}
-	if agentID == "workbuddy" {
+	if manualAgent(agentID) {
 		return p, ErrManualPackageRequired
 	}
 	record, raw, err := readRecord(repository, agentID)

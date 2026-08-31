@@ -23,6 +23,7 @@ function Copy-ATNReleasePackage {
 $packageRoot = Split-Path $PSScriptRoot
 $release = Join-Path $packageRoot 'scripts/Test-Release.ps1'
 $agents = @('codex','claude-code','cursor','gemini-cli','opencode','workbuddy')
+$catalogAgents = @($agents + @('openclaw','hermes'))
 $temp = Join-Path ([IO.Path]::GetTempPath()) ("atn-distribution-" + [guid]::NewGuid())
 $staging = Join-Path $temp 'Agent Task Notify 中文 space'
 try {
@@ -33,13 +34,16 @@ try {
     Assert-True ([IO.File]::Exists((Join-Path $packageRoot 'skills/agent-task-notify/SKILL.md'))) 'plugin skill ships with package'
 
     $catalog = Get-Content -Raw -LiteralPath (Join-Path $packageRoot 'assets/agent-icons.json') | ConvertFrom-Json -AsHashtable
-    Assert-Equal $catalog.Count 6 'catalog retains six source records'
+    Assert-Equal $catalog.Count 8 'catalog retains eight source records'
     Import-Module (Join-Path $packageRoot 'src/Settings.psm1') -Force
     Import-Module (Join-Path $packageRoot 'src/Providers.psm1') -Force
-    foreach ($agent in $agents) {
+    foreach ($agent in $catalogAgents) {
         $record = @($catalog | Where-Object { $_.id -ceq $agent })
         Assert-Equal $record.Count 1 "$agent has exactly one catalog record"
         foreach ($field in @('sourceUrl','iconUrl','mimeType','width','height','sha256','usage')) { Assert-True ($record[0].ContainsKey($field)) "$agent includes reviewed $field metadata" }
+    }
+    foreach ($agent in $agents) {
+        $record = @($catalog | Where-Object { $_.id -ceq $agent })
         $settings = @{provider='bark';continuous=$true;level='critical';volume=7;sound='alarm';ntfyPriority=4;icons=@{}}
         $main = New-ATNPayload $agent $settings 3600 stopped
         $extension = New-ATNPayload $agent $settings 3600 stopped -Extension

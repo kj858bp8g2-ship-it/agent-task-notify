@@ -168,12 +168,14 @@ func TestMalformedAndUnsafePlanningIsReadOnly(t *testing.T) {
 			t.Fatal("unsafe options accepted")
 		}
 	}
-	f.options.AgentID = "workbuddy"
-	if _, err := PlanInstall(context.Background(), f.repo, f.options); !errors.Is(err, ErrManualPackageRequired) {
-		t.Fatal("workbuddy not manual")
-	}
-	if _, err := PlanUninstall(context.Background(), f.repo, "workbuddy"); !errors.Is(err, ErrManualPackageRequired) {
-		t.Fatal("workbuddy automatic uninstall")
+	for _, agent := range []string{"workbuddy", "openclaw", "hermes"} {
+		f.options.AgentID = agent
+		if _, err := PlanInstall(context.Background(), f.repo, f.options); !errors.Is(err, ErrManualPackageRequired) {
+			t.Fatalf("%s not manual", agent)
+		}
+		if _, err := PlanUninstall(context.Background(), f.repo, agent); !errors.Is(err, ErrManualPackageRequired) {
+			t.Fatalf("%s automatic uninstall", agent)
+		}
 	}
 }
 
